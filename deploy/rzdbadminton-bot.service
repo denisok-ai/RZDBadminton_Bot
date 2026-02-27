@@ -1,0 +1,19 @@
+[Unit]
+Description=RZDBadminton Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=denisok
+Group=denisok
+WorkingDirectory=/home/denisok/projects/RZDBadminton_Bot
+ExecStart=/home/denisok/projects/RZDBadminton_Bot/.venv/bin/python3 bot.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=/home/denisok/projects/RZDBadminton_Bot/.env
+
+[Install]
+WantedBy=multi-user.target

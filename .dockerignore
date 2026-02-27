@@ -1,0 +1,15 @@
+.venv/
+.env
+*.session
+*.session-journal
+data/
+logs/
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.cursorrules
+docs/
+.idea/
+.vscode/
+.DS_Store

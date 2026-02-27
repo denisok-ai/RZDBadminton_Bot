@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    image: rzdbadminton_bot:latest
+    container_name: rzdbadminton_bot
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: unless-stopped

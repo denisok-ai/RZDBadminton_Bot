@@ -1,0 +1,77 @@
+"""
+@file: config.py
+@description: Конфигурация приложения через Pydantic Settings и .env
+@dependencies: pydantic-settings, python-dotenv
+@created: 2025-02-25
+"""
+
+from pathlib import Path
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Настройки приложения из переменных окружения."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    bot_token: str
+    admin_id: int
+    main_chat_id: int
+    test_chat_id: int | None = None
+
+    deepseek_api_key: str
+    deepseek_base_url: str = "https://api.deepseek.com"
+
+    yandex_disk_token: str
+
+    telegram_api_id: int
+    telegram_api_hash: str
+
+    database_url: str = "sqlite+aiosqlite:///./badminton_bot.db"
+
+    debug_mode: bool = False  # true в .env — опросы в TEST_CHAT_ID
+
+    timezone: str = "Europe/Moscow"
+    sources_file: Path = Path("Doc/sources.txt")
+    rules_file: Path = Path("Doc/rules")
+    report_file: Path = Path("Doc/Бадминтон.xlsx")
+    report_template_file: Path = Path("Doc/Бадминтон_шаблон.xlsx")  # шаблон — копировать при создании
+    attendance_report_file: Path = Path("Doc/Attendance_Report.xlsx")  # рабочий файл отчёта (excel_reporter)
+    report_template_url: str = "https://disk.yandex.ru/i/AJkaQ3HpEjz0aw"
+    report_upload_path: str = "/Отчёты/Бадминтон"  # к имени добавится _YYYY-MM-DD.xlsx
+    youtube_channel_id: str | None = None  # BWF TV, например UCsRNTi1LIrgsxpOrejJo6Xw
+
+    # Имена тренеров по дням (можно переопределить в .env: TRAINER_MON=Иванов, TRAINER_WED=Петрова)
+    trainer_mon: str = "Тренер (Пн)"
+    trainer_wed: str = "Тренер (Ср)"
+
+
+def get_settings() -> Settings:
+    """Возвращает экземпляр настроек."""
+    return Settings()
+
+
+def get_poll_chat_id(settings: Settings) -> int:
+    """Чат для опросов: тестовый при DEBUG_MODE, иначе основной."""
+    if settings.debug_mode and settings.test_chat_id is not None:
+        return settings.test_chat_id
+    return settings.main_chat_id
+
+
+def get_publish_chat_id(settings: Settings) -> int:
+    """Чат для публикации новостей/отчётов: тестовый при DEBUG_MODE, иначе основной."""
+    if settings.debug_mode and settings.test_chat_id is not None:
+        return settings.test_chat_id
+    return settings.main_chat_id
+
+
+def get_moderation_chat_id(settings: Settings) -> int:
+    """Чат для модерации новостей: группа (как и публикация), чтобы «В ленту» работало."""
+    if settings.debug_mode and settings.test_chat_id is not None:
+        return settings.test_chat_id
+    return settings.main_chat_id
