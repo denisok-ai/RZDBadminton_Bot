@@ -58,9 +58,30 @@ def _is_admin(user_id: int | None) -> bool:
     return user_id is not None and user_id == get_settings().admin_id
 
 
+async def _block_in_group(message: Message) -> bool:
+    """
+    Если сообщение из группового чата — удалить его и вернуть True (прекратить обработку).
+    Admin-команды должны выполняться только в личном чате с ботом.
+    """
+    if message.chat.type == "private":
+        return False
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    return True
+
+
 @router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
-    """Приветствие + меню кнопок SportTech."""
+    """Приветствие + меню кнопок SportTech. В группах — только краткое приветствие без клавиатуры."""
+    if message.chat.type != "private":
+        # В группе не выводим меню и не засоряем чат
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
     is_admin = bool(message.from_user and _is_admin(message.from_user.id))
     await message.answer(
         start_screen(is_admin=is_admin),
@@ -77,8 +98,10 @@ async def cmd_help(message: Message) -> None:
 
 @router.message(or_f(Command("poll"), F.text == "🚀 Опрос"))
 async def cmd_poll(message: Message, bot: Bot) -> None:
-    """Ручная отправка опроса (только для админа)."""
+    """Ручная отправка опроса (только для админа, только в личке)."""
     if not (message.from_user and _is_admin(message.from_user.id)):
+        return
+    if await _block_in_group(message):
         return
     session_factory = get_session_factory()
     if not session_factory:
@@ -101,8 +124,10 @@ async def cmd_poll(message: Message, bot: Bot) -> None:
 
 @router.message(or_f(Command("news"), F.text == "📰 Новости"))
 async def cmd_news(message: Message, bot: Bot) -> None:
-    """Ручной запуск парсинга новостей (только для админа)."""
+    """Ручной запуск парсинга новостей (только для админа, только в личке)."""
     if not (message.from_user and _is_admin(message.from_user.id)):
+        return
+    if await _block_in_group(message):
         return
     session_factory = get_session_factory()
     if not session_factory:
@@ -151,8 +176,10 @@ async def cmd_news(message: Message, bot: Bot) -> None:
 
 @router.message(or_f(Command("quiz"), F.text == "🎯 Квиз"))
 async def cmd_quiz(message: Message, bot: Bot) -> None:
-    """Ручная отправка квиза (только для админа)."""
+    """Ручная отправка квиза (только для админа, только в личке)."""
     if not (message.from_user and _is_admin(message.from_user.id)):
+        return
+    if await _block_in_group(message):
         return
     chat_id = message.chat.id if message.chat and message.chat.type != "private" else None
     if await send_friday_quiz(bot, chat_id):
@@ -163,8 +190,10 @@ async def cmd_quiz(message: Message, bot: Bot) -> None:
 
 @router.message(or_f(Command("top3"), F.text == "🏆 Топ-3"))
 async def cmd_top3(message: Message, bot: Bot) -> None:
-    """Ручная отправка Топ-3 за текущий месяц (только для админа)."""
+    """Ручная отправка Топ-3 за текущий месяц (только для админа, только в личке)."""
     if not (message.from_user and _is_admin(message.from_user.id)):
+        return
+    if await _block_in_group(message):
         return
     chat_id = message.chat.id if message.chat and message.chat.type != "private" else None
     if await send_monthly_top3(bot, chat_id, use_previous_month=False):
@@ -175,8 +204,10 @@ async def cmd_top3(message: Message, bot: Bot) -> None:
 
 @router.message(or_f(Command("youtube"), F.text == "🎬 YouTube"))
 async def cmd_youtube(message: Message, bot: Bot) -> None:
-    """Ручная проверка новых Highlights BWF (только для админа)."""
+    """Ручная проверка новых Highlights BWF (только для админа, только в личке)."""
     if not (message.from_user and _is_admin(message.from_user.id)):
+        return
+    if await _block_in_group(message):
         return
     await message.answer("▸ Проверяю BWF TV...")
     try:
@@ -211,9 +242,14 @@ async def cmd_youtube(message: Message, bot: Bot) -> None:
 
 @router.message(Command("clearyoutube"))
 async def cmd_clearyoutube(message: Message) -> None:
-    """Сбросить список уже опубликованных YouTube-видео (для повторной публикации)."""
+    """Сбросить список уже опубликованных YouTube-видео (для повторной публикации). Только в личке."""
     if not (message.from_user and _is_admin(message.from_user.id)):
-        await message.answer(error_msg("Команда доступна только администратору"))
+        return
+    if message.chat.type != "private":
+        try:
+            await message.delete()
+        except Exception:
+            pass
         return
     from services.youtube_monitor import clear_youtube_processed
     cleared = clear_youtube_processed()
@@ -254,8 +290,10 @@ async def cmd_ratings(message: Message) -> None:
 
 @router.message(or_f(Command("report"), F.text == "📊 Отчёт"))
 async def cmd_report(message: Message, bot: Bot) -> None:
-    """Ручное формирование месячного отчёта и отправка файла (только для админа)."""
+    """Ручное формирование месячного отчёта и отправка файла (только для админа, только в личке)."""
     if not (message.from_user and _is_admin(message.from_user.id)):
+        return
+    if await _block_in_group(message):
         return
     session_factory = get_session_factory()
     if not session_factory:
@@ -268,8 +306,9 @@ async def cmd_report(message: Message, bot: Bot) -> None:
     if path:
         unique_users = len({r[0] for r in records})
         sessions = len({r[3] for r in records})
+        # Всегда в личку админу — не в групповой чат
         await bot.send_document(
-            chat_id=message.chat.id,
+            chat_id=get_settings().admin_id,
             document=FSInputFile(path),
             caption=success_msg(
                 f"Отчёт · {MONTHS_RU.get(report_date.month, '')} {report_date.year}",
@@ -282,8 +321,14 @@ async def cmd_report(message: Message, bot: Bot) -> None:
 
 @router.message(F.text.in_({"⚙️ Админ", "Админ"}))
 async def cmd_admin_refresh(message: Message) -> None:
-    """Обновить клавиатуру с admin-кнопками (для случаев когда меню сбилось)."""
+    """Обновить клавиатуру с admin-кнопками. Только в личке."""
     if not (message.from_user and _is_admin(message.from_user.id)):
+        return
+    if message.chat.type != "private":
+        try:
+            await message.delete()
+        except Exception:
+            pass
         return
     await message.answer(
         "▸ Меню обновлено",
@@ -399,14 +444,14 @@ async def cmd_rules(message: Message) -> None:
 
 
 @router.message(Command("chatid"))
-async def cmd_chatid(message: Message) -> None:
-    """Показать ID текущего чата и текущие настройки (только для админа)."""
+async def cmd_chatid(message: Message, bot: Bot) -> None:
+    """Показать ID текущего чата (работает в группах, ответ всегда в личку)."""
     if not (message.from_user and _is_admin(message.from_user.id)):
         return
     settings = get_settings()
     chat = message.chat
-    await message.answer(
-        f"<b>ID этого чата:</b> <code>{chat.id}</code>\n"
+    text = (
+        f"<b>ID чата:</b> <code>{chat.id}</code>\n"
         f"<b>Тип:</b> {chat.type}\n"
         f"<b>Название:</b> {chat.title or chat.username or '—'}\n"
         "\n"
@@ -415,15 +460,31 @@ async def cmd_chatid(message: Message) -> None:
         f"• TEST_CHAT_ID: <code>{settings.test_chat_id}</code>\n"
         f"• MAIN_CHAT_ID: <code>{settings.main_chat_id}</code>\n"
         "\n"
-        f"<b>Публикация идёт в:</b> <code>{'TEST_CHAT_ID = ' + str(settings.test_chat_id) if settings.debug_mode and settings.test_chat_id else 'MAIN_CHAT_ID = ' + str(settings.main_chat_id)}</code>"
+        f"<b>Публикация идёт в:</b> <code>"
+        f"{'TEST_CHAT_ID = ' + str(settings.test_chat_id) if settings.debug_mode and settings.test_chat_id else 'MAIN_CHAT_ID = ' + str(settings.main_chat_id)}"
+        f"</code>"
     )
+    if message.chat.type != "private":
+        # В группе: удалить команду, ответить только в личку
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await bot.send_message(settings.admin_id, text)
+    else:
+        await message.answer(text)
 
 
 @router.message(Command("resetpending"))
 async def cmd_reset_pending(message: Message) -> None:
-    """Вернуть все 'published' новости в статус 'pending' (для повтора публикации после исправления настроек)."""
+    """Вернуть все 'published' новости в статус 'pending'. Только в личке."""
     if not (message.from_user and _is_admin(message.from_user.id)):
-        await message.answer(error_msg("Команда доступна только администратору"))
+        return
+    if message.chat.type != "private":
+        try:
+            await message.delete()
+        except Exception:
+            pass
         return
     session_factory = get_session_factory()
     if not session_factory:
@@ -448,9 +509,14 @@ async def cmd_reset_pending(message: Message) -> None:
 
 @router.message(Command("clearnews"))
 async def cmd_clear_news(message: Message) -> None:
-    """Сбросить список обработанных постов (для повторного тестирования парсинга)."""
+    """Сбросить список обработанных постов. Только в личке."""
     if not (message.from_user and _is_admin(message.from_user.id)):
-        await message.answer(error_msg("Команда доступна только администратору"))
+        return
+    if message.chat.type != "private":
+        try:
+            await message.delete()
+        except Exception:
+            pass
         return
     session_factory = get_session_factory()
     if not session_factory:
@@ -471,9 +537,14 @@ async def cmd_clear_news(message: Message) -> None:
 
 @router.message(Command("resetreport"))
 async def cmd_reset_report(message: Message) -> None:
-    """Информация о новом формате отчётов (только для администратора)."""
+    """Информация о новом формате отчётов. Только в личке."""
     if not (message.from_user and _is_admin(message.from_user.id)):
-        await message.answer(error_msg("Команда доступна только администратору"))
+        return
+    if message.chat.type != "private":
+        try:
+            await message.delete()
+        except Exception:
+            pass
         return
     await message.answer(
         success_msg(
