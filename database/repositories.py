@@ -5,14 +5,28 @@
 @created: 2025-02-25
 """
 
-from datetime import date, datetime
-from typing import Sequence
+import logging
+from collections.abc import Sequence
+from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import Attendance, FeedbackPoll, NewsModeration, Poll, PollVote, ProcessedNews, User
+from database.models import (
+    Attendance,
+    FeedbackPoll,
+    NewsModeration,
+    Poll,
+    PollVote,
+    ProcessedNews,
+    QuizRecord,
+    QuizVote,
+    User,
+    YouTubeModeration,
+)
+
+logger = logging.getLogger("rzdbadminton")
 
 
 async def get_or_create_user(session: AsyncSession, user_id: int, **kwargs) -> User:
@@ -511,3 +525,306 @@ async def unmark_news_processed(
         )
     )
     await session.commit()
+
+
+async def create_youtube_moderation(
+    session: AsyncSession,
+    video_id: str,
+    title: str,
+    link: str,
+    channel_id: str,
+) -> YouTubeModeration | None:
+    """
+    Создать запись YouTube-видео на модерации.
+    Returns:
+        Запись при успехе; None при дубликате video_id.
+    """
+    ym = YouTubeModeration(
+        video_id=video_id,
+        title=title,
+        link=link,
+        channel_id=channel_id,
+    )
+    session.add(ym)
+    try:
+        await session.commit()
+        await session.refresh(ym)
+        return ym
+    except IntegrityError:
+        await session.rollback()
+        return None
+
+
+async def get_youtube_moderation(
+    session: AsyncSession,
+    moderation_id: int,
+) -> YouTubeModeration | None:
+    """Получить запись YouTube на модерации по ID."""
+    result = await session.execute(
+        select(YouTubeModeration).where(YouTubeModeration.id == moderation_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def clear_pending_youtube_moderation(session: AsyncSession) -> int:
+    """Удалить все записи YouTube на модерации (очистка очереди предложений). Возвращает количество удалённых."""
+    result = await session.execute(delete(YouTubeModeration))
+    count = result.rowcount if result.rowcount is not None else 0
+    await session.commit()
+    return count
+
+
+async def create_quiz_record(
+    session: AsyncSession,
+    telegram_poll_id: str,
+    chat_id: int,
+    question: str | None = None,
+    correct_answer: str | None = None,
+    explanation: str | None = None,
+) -> QuizRecord | None:
+    """Сохранить запись об отправленном квизе. При дубликате telegram_poll_id возвращает None."""
+    record = QuizRecord(
+        telegram_poll_id=telegram_poll_id,
+        chat_id=chat_id,
+        question=question,
+        correct_answer=correct_answer,
+        explanation=explanation,
+    )
+    session.add(record)
+    try:
+        await session.commit()
+        await session.refresh(record)
+        return record
+    except IntegrityError:
+        await session.rollback()
+        logger.debug(
+            "Дубликат quiz_record (poll_id=%s, chat_id=%s), запись уже есть в БД",
+            telegram_poll_id,
+            chat_id,
+        )
+        return None
+    except Exception as e:
+        await session.rollback()
+        logger.warning(
+            "Не удалось сохранить quiz_record (poll_id=%s): %s",
+            telegram_poll_id,
+            e,
+        )
+        return None
+
+
+async def get_quiz_record_by_telegram_id(
+    session: AsyncSession,
+    telegram_poll_id: str,
+) -> QuizRecord | None:
+    """Найти запись квиза по Telegram poll_id (для определения, что ответ пришёл на квиз)."""
+    result = await session.execute(
+        select(QuizRecord).where(QuizRecord.telegram_poll_id == telegram_poll_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def upsert_quiz_vote(
+    session: AsyncSession,
+    telegram_poll_id: str,
+    user_id: int,
+) -> None:
+    """Сохранить ответ пользователя на квиз (один голос на пользователя на квиз; при повторе — игнор)."""
+    vote = QuizVote(telegram_poll_id=telegram_poll_id, user_id=user_id)
+    session.add(vote)
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        logger.debug("quiz_vote дубликат: poll_id=%s user_id=%s", telegram_poll_id, user_id)
+
+
+async def get_latest_quiz_for_chat(
+    session: AsyncSession,
+    chat_id: int,
+    within_hours: int = 12,
+) -> QuizRecord | None:
+    """
+    Последний квиз, отправленный в чат за последние within_hours часов.
+    Используется для публикации правильного ответа (пятница 21:00).
+    """
+    cutoff = datetime.now(UTC) - timedelta(hours=within_hours)
+    result = await session.execute(
+        select(QuizRecord)
+        .where(
+            QuizRecord.chat_id == chat_id,
+            QuizRecord.sent_at >= cutoff,
+        )
+        .order_by(QuizRecord.sent_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_activity_stats(
+    session: AsyncSession,
+    year: int,
+    month: int,
+) -> dict:
+    """
+    Статистика активности за месяц.
+
+    Returns:
+        Словарь с ключами:
+        - polls_sent: кол-во опросов посещаемости
+        - poll_participants: уникальных участников (любой ответ)
+        - poll_attending: проголосовали «Приду»
+        - news_published: опубликованных новостей
+        - quizzes_sent: отправлено квизов
+        - quiz_participants: уникальных участников квизов за месяц
+        - feedback_sent: опросов обратной связи
+        - feedback_avg: средняя оценка (float, 0.0 если нет оценок)
+        - feedback_count: кол-во оценок
+        - youtube_sent: отправлено на модерацию за месяц
+        - youtube_published: опубликовано за месяц
+        - youtube_rejected: отклонено за месяц
+        - youtube_pending_total: всего в очереди (ожидают решения)
+    """
+    import calendar
+    from datetime import datetime as dt
+    from sqlalchemy import func
+
+    _, last_day = calendar.monthrange(year, month)
+    start_date = date(year, month, 1)
+    end_date = date(year, month, last_day)
+    start_dt = dt(year, month, 1, 0, 0, 0)
+    end_dt = dt(year, month, last_day, 23, 59, 59)
+
+    # Опросы посещаемости
+    polls_res = await session.execute(
+        select(func.count(Poll.id)).where(
+            Poll.poll_date >= start_date,
+            Poll.poll_date <= end_date,
+        )
+    )
+    polls_sent = polls_res.scalar_one() or 0
+
+    # Уникальные участники (любой голос)
+    participants_res = await session.execute(
+        select(func.count(func.distinct(PollVote.user_id)))
+        .join(Poll, Poll.id == PollVote.poll_id)
+        .where(
+            Poll.poll_date >= start_date,
+            Poll.poll_date <= end_date,
+        )
+    )
+    poll_participants = participants_res.scalar_one() or 0
+
+    # Проголосовали «Приду» (option_index=0)
+    attending_res = await session.execute(
+        select(func.count(func.distinct(PollVote.user_id)))
+        .join(Poll, Poll.id == PollVote.poll_id)
+        .where(
+            Poll.poll_date >= start_date,
+            Poll.poll_date <= end_date,
+            PollVote.option_index == 0,
+        )
+    )
+    poll_attending = attending_res.scalar_one() or 0
+
+    # Опубликованные новости
+    news_res = await session.execute(
+        select(func.count(NewsModeration.id)).where(
+            NewsModeration.status == "published",
+            NewsModeration.created_at >= start_dt,
+            NewsModeration.created_at <= end_dt,
+        )
+    )
+    news_published = news_res.scalar_one() or 0
+
+    # Квизы
+    quizzes_res = await session.execute(
+        select(func.count(QuizRecord.id)).where(
+            QuizRecord.sent_at >= start_dt,
+            QuizRecord.sent_at <= end_dt,
+        )
+    )
+    quizzes_sent = quizzes_res.scalar_one() or 0
+
+    # Участники квизов за месяц (уникальные пользователи, ответившие на квизы за период)
+    quiz_part_res = await session.execute(
+        select(func.count(func.distinct(QuizVote.user_id)))
+        .select_from(QuizVote)
+        .join(QuizRecord, QuizVote.telegram_poll_id == QuizRecord.telegram_poll_id)
+        .where(
+            QuizRecord.sent_at >= start_dt,
+            QuizRecord.sent_at <= end_dt,
+        )
+    )
+    quiz_participants = quiz_part_res.scalar_one() or 0
+
+    # Опросы обратной связи
+    feedback_res = await session.execute(
+        select(func.count(FeedbackPoll.id)).where(
+            FeedbackPoll.created_at >= start_dt,
+            FeedbackPoll.created_at <= end_dt,
+        )
+    )
+    feedback_sent = feedback_res.scalar_one() or 0
+
+    # Средняя оценка за месяц
+    rating_res = await session.execute(
+        select(func.avg(Attendance.rating), func.count(Attendance.id)).where(
+            Attendance.attendance_date >= start_date,
+            Attendance.attendance_date <= end_date,
+            Attendance.rating.isnot(None),
+        )
+    )
+    row = rating_res.one()
+    avg_rating = round(float(row[0]), 1) if row[0] else 0.0
+    rating_count = int(row[1]) if row[1] else 0
+
+    # YouTube за месяц (по created_at)
+    yt_sent_res = await session.execute(
+        select(func.count(YouTubeModeration.id)).where(
+            YouTubeModeration.created_at >= start_dt,
+            YouTubeModeration.created_at <= end_dt,
+        )
+    )
+    youtube_sent = yt_sent_res.scalar_one() or 0
+
+    yt_pub_res = await session.execute(
+        select(func.count(YouTubeModeration.id)).where(
+            YouTubeModeration.created_at >= start_dt,
+            YouTubeModeration.created_at <= end_dt,
+            YouTubeModeration.status == "published",
+        )
+    )
+    youtube_published = yt_pub_res.scalar_one() or 0
+
+    yt_rej_res = await session.execute(
+        select(func.count(YouTubeModeration.id)).where(
+            YouTubeModeration.created_at >= start_dt,
+            YouTubeModeration.created_at <= end_dt,
+            YouTubeModeration.status == "rejected",
+        )
+    )
+    youtube_rejected = yt_rej_res.scalar_one() or 0
+
+    yt_pending_res = await session.execute(
+        select(func.count(YouTubeModeration.id)).where(
+            YouTubeModeration.status == "pending",
+        )
+    )
+    youtube_pending_total = yt_pending_res.scalar_one() or 0
+
+    return {
+        "polls_sent": polls_sent,
+        "poll_participants": poll_participants,
+        "poll_attending": poll_attending,
+        "news_published": news_published,
+        "quizzes_sent": quizzes_sent,
+        "quiz_participants": quiz_participants,
+        "feedback_sent": feedback_sent,
+        "feedback_avg": avg_rating,
+        "feedback_count": rating_count,
+        "youtube_sent": youtube_sent,
+        "youtube_published": youtube_published,
+        "youtube_rejected": youtube_rejected,
+        "youtube_pending_total": youtube_pending_total,
+    }

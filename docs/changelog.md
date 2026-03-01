@@ -1,5 +1,68 @@
 # Changelog
 
+## [2026-03-01] — Документация: приведение в соответствие с текущими функциями
+
+### Изменено (документация)
+
+- **README.md** — актуальный список возможностей: обратная связь (Пн/Ср 22:45, Пт 11:45, 1-го 10:00), YouTube с модерацией, кнопка «⚙️ Админ», бекапы БД, ротация логов, run-watchdog.sh
+- **docs/Project.md** — требования F-016 (обратная связь), F-018 (YouTube с модерацией); дерево проекта (handlers: top3, admin_helpers, youtube_moderation; services: excel_reporter, db_backup); этапы 5–6; таблица переменных окружения (DEBUG_MODE, TIMEZONE, RULES_DOCX_FILE, YOUTUBE_CHANNEL_ID, TRAINER_*); диаграмма компонентов
+- **docs/Tasktracker.md** — T5-2 (обратная связь), T5-4 (YouTube модерация); T6-6 (бекапы), T6-7 (ротация логов), T6-8 (кнопка Админ); сводка этапов; доработки (обратная связь, YouTube, бекапы, аудит)
+- **docs/Описание_проекта_для_презентации.md** — обратная связь (расписание в чат + итоги), YouTube (модерация), админ-панель и устойчивость (бекапы, ротация логов, автоподнятие)
+
+---
+
+## [2026-03-01] — Рекомендации: DeepSeek лимит, docstrings, аудит, setup
+
+### Добавлено
+
+- **Мониторинг расхода DeepSeek** — опция `DEEPSEEK_MONTHLY_TOKEN_LIMIT` в .env (0 = отключено). Учёт токенов в `data/llm_usage.json`, при достижении лимита вызовы LLM блокируются, в лог пишется ERROR (алерт админу). В отчёте «📊 Статистика» — блок «DeepSeek: N токенов за месяц (лимит M)».
+- **Docstrings** в `services/llm.py` для хелперов: `_sanitize_poll_text`, `_normalize_text`, `_quiz_signature`, `_get_recent_history`, `_format_recent_items`, `_remember_generation`.
+
+### Изменено
+
+- **docs/audit_code_2026-03.md** — описание app_state обновлено (типы добавлены), рекомендация отмечена выполненной.
+- **docs/setup.md** — блок «Перед коммитом»: `ruff check . && ruff format . && pytest`; рекомендация по pre-commit.
+- **docs/Project.md** — в таблицу переменных окружения добавлен `DEEPSEEK_MONTHLY_TOKEN_LIMIT`.
+- **.env.example** — комментарий и пример `DEEPSEEK_MONTHLY_TOKEN_LIMIT`.
+
+---
+
+## [2026-03-01] — Тесты, типы, логирование
+
+### Добавлено
+
+- **tests/test_news_helpers.py** — тесты для `_parse_moderation_id` (граничные случаи callback_data)
+- **tests/test_constants.py** — тесты для `MONTHS_RU` (12 месяцев, строчные названия)
+
+### Изменено
+
+- **handlers/news.py** — хелпер `_require_admin(callback)`; во всех callback-обработчиках модерации одна проверка
+- **database/repositories.py** — в `create_quiz_record`: логирование при IntegrityError (debug) и при прочих ошибках (warning)
+- **database/__init__.py** — аннотации типов: `create_engine` → `AsyncEngine`, `create_session_factory` → `async_sessionmaker[AsyncSession]`, `init_db(engine: AsyncEngine)`
+
+---
+
+## [2026-03-01] — НФБР, .docx для квиза, справка, статистика, меню, YouTube
+
+### Добавлено
+
+- **Квиз: правила НФБР** — источник правил: приказ Минспорта РФ от 12.07.2021 № 546, ссылка https://nfbr.ru/documents/rules в объяснении ответа
+- **Контекст квиза из .docx** — опция `RULES_DOCX_FILE` в конфиге; при наличии файла текст подставляется в промпт (python-docx). См. `docs/rules_nfbr_docx.md`
+- **Отчёт «📊 Статистика»** — модель QuizRecord, `get_activity_stats()`, кнопка в админ-панели и команда `/stats` (опросы, новости, квизы, обратная связь за месяц)
+- **Кнопка «📊 Статистика»** в inline-админ-панели
+
+### Изменено
+
+- **Меню** — обычные пользователи видят только 3 кнопки (Зал, Расписание, Правила); «📝 Оценить», «📈 Рейтинги», «❓ Помощь» и админ-кнопки только для админа
+- **Блокировка в группе** — /help, /ratings, «📝 Оценить» удаляются без ответа; /location, /timetable, /rules по-прежнему отвечают в группе
+- **YouTube** — Channel ID BWF TV, убран строгий фильтр по словам, диагностика ошибок RSS
+- **Квиз** — поле EXPLANATION в промпте + ссылка на правила НФБР; сохранение QuizRecord при отправке
+- **Справка /help** — блок «Оценка и отчёты» (Оценить, Рейтинги, Статистика) только для админа
+- **config**: `get_settings()` закэширован (lru_cache); добавлен `rules_docx_file`. **models**: `datetime.utcnow` → `datetime.now(UTC)`
+- **Удалён** `services/report.py` (не использовался)
+
+---
+
 ## [2026-02-26] — UX, админ-хелперы, справка
 
 ### Добавлено

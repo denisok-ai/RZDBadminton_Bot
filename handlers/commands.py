@@ -5,6 +5,8 @@
 @created: 2025-02-25
 """
 
+import asyncio
+import logging
 from calendar import monthrange
 from datetime import date
 from pathlib import Path
@@ -13,7 +15,7 @@ from aiogram import Bot, F, Router
 from aiogram.filters import Command, or_f
 from aiogram.types import CallbackQuery, FSInputFile, Message
 
-from ui.keyboards import main_menu_keyboard
+from ui.keyboards import main_menu_keyboard, report_month_keyboard, stats_month_keyboard
 
 from app_state import get_session_factory
 from config import get_settings
@@ -29,15 +31,20 @@ from ui.design import (
     success_msg,
     timetable_card,
 )
-from database.repositories import get_monthly_attendance_records
+from database.repositories import (
+    clear_pending_youtube_moderation,
+    get_monthly_attendance_records,
+)
 from handlers.admin_helpers import (
     ADMIN_ACTIONS,
     AdminContext,
     run_admin_news,
     run_admin_poll,
     run_admin_quiz,
+    run_admin_quiz_answer,
     run_admin_ratings,
     run_admin_report,
+    run_admin_stats,
     run_admin_top3,
     run_admin_youtube,
 )
@@ -46,10 +53,11 @@ from handlers.polls import send_attendance_poll
 from handlers.quiz import send_friday_quiz
 from handlers.top3 import send_monthly_top3
 from services.scheduler import run_news_monitor
-from services.excel_reporter import MONTHS_RU, get_report_file as generate_report
-from services.youtube_monitor import get_unseen_highlights
+from services.excel_reporter import get_report_file as generate_report
+from utils.constants import MONTHS_RU
 
 router = Router(name="commands")
+logger = logging.getLogger("rzdbadminton")
 
 LOCATION_URL = "https://yandex.ru/maps/org/olimpiyskiy_tsentr_imeni_bratyev_znamenskikh/1084660232/"
 
@@ -58,29 +66,77 @@ def _is_admin(user_id: int | None) -> bool:
     return user_id is not None and user_id == get_settings().admin_id
 
 
+async def _delete_after(msg: Message, seconds: float) -> None:
+    """Удалить сообщение бота через заданное время (для служебного обновления клавиатуры)."""
+    try:
+        await asyncio.sleep(seconds)
+        await msg.delete()
+    except Exception:
+        pass
+
+
+def _parse_year_month(callback_data: str | None, prefix: str) -> tuple[int, int] | None:
+    """
+    Разобрать callback_data вида prefix + "YYYY:MM" в (year, month).
+    prefix — например "report_sel:" или "stats_sel:" (с двоеточием).
+    Returns (year, month) или None при неверном формате.
+    """
+    if not callback_data or not callback_data.startswith(prefix):
+        return None
+    part = callback_data.split(":", 1)[-1].strip()
+    parts = part.split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        y, m = int(parts[0]), int(parts[1])
+        if not (1 <= m <= 12):
+            return None
+        return (y, m)
+    except (ValueError, TypeError):
+        return None
+
+
 async def _block_in_group(message: Message) -> bool:
     """
-    Если сообщение из группового чата — удалить его и вернуть True (прекратить обработку).
-    Admin-команды должны выполняться только в личном чате с ботом.
+    Если сообщение из группового чата — удалить его, обновить клавиатуру до 3 кнопок и вернуть True.
+    В группе кнопки Оценить/Рейтинги/Помощь недоступны; ответа бот не даёт.
+    Бот должен иметь право «Удаление сообщений» в группе.
     """
     if message.chat.type == "private":
         return False
     try:
         await message.delete()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(
+            "Не удалось удалить сообщение в группе %s: %s. Выдайте боту право «Удаление сообщений».",
+            message.chat.id,
+            e,
+        )
+    # Принудительно обновить клавиатуру в группе до 3 кнопок; служебное сообщение удалить через 2 с
+    try:
+        sent = await message.answer(
+            "\u200b",  # нулевая ширина — почти не видно
+            reply_markup=main_menu_keyboard(is_admin=False),
+        )
+        asyncio.create_task(_delete_after(sent, 2.0))
+    except Exception as e:
+        logger.debug("Не удалось обновить клавиатуру в группе: %s", e)
     return True
 
 
 @router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
-    """Приветствие + меню кнопок SportTech. В группах — только краткое приветствие без клавиатуры."""
+    """Приветствие + меню кнопок. В группе — только 3 кнопки (Зал, Расписание, Правила); в личке — полное меню для админа."""
     if message.chat.type != "private":
-        # В группе не выводим меню и не засоряем чат
+        # В группе — короткое меню (без Оценить, Рейтинги, Помощь и админ-кнопок)
         try:
             await message.delete()
         except Exception:
             pass
+        await message.answer(
+            "🏸 Бот секции «Бадминтон РЖД». Зал, расписание, правила — кнопки ниже.",
+            reply_markup=main_menu_keyboard(is_admin=False),
+        )
         return
     is_admin = bool(message.from_user and _is_admin(message.from_user.id))
     await message.answer(
@@ -91,7 +147,9 @@ async def cmd_start(message: Message) -> None:
 
 @router.message(or_f(Command("help"), F.text == "❓ Помощь"))
 async def cmd_help(message: Message) -> None:
-    """Справка по командам и кнопкам."""
+    """Справка — только в личном чате. В группе — удалить сообщение и не отвечать."""
+    if await _block_in_group(message):
+        return
     is_admin = bool(message.from_user and _is_admin(message.from_user.id))
     await message.answer(help_screen(is_admin=is_admin))
 
@@ -204,40 +262,73 @@ async def cmd_top3(message: Message, bot: Bot) -> None:
 
 @router.message(or_f(Command("youtube"), F.text == "🎬 YouTube"))
 async def cmd_youtube(message: Message, bot: Bot) -> None:
-    """Ручная проверка новых Highlights BWF (только для админа, только в личке)."""
+    """Ручная проверка новых видео BWF TV — отправка на модерацию админу (в личку); в чат только после «В ленту»."""
     if not (message.from_user and _is_admin(message.from_user.id)):
         return
     if await _block_in_group(message):
         return
-    await message.answer("▸ Проверяю BWF TV...")
+    from services.youtube_monitor import DEFAULT_BWF_CHANNEL_ID, check_highlights_status, mark_youtube_sent_to_moderation
+    from database.repositories import create_youtube_moderation
+    from handlers.youtube_moderation import send_youtube_to_moderation
+
+    settings = get_settings()
+    ch_id = settings.youtube_channel_id or DEFAULT_BWF_CHANNEL_ID
+    await message.answer("▸ Проверяю канал BWF TV…")
     try:
-        from services.youtube_monitor import check_highlights_status
         result = await check_highlights_status()
         all_count = len(result["all"])
         new_videos = result["new"]
         seen_count = len(result["seen"])
+        rss_error = result.get("error")
 
-        if not new_videos:
-            hint = "\nИспользуйте /clearyoutube для повторной публикации" if seen_count > 0 else ""
+        if rss_error:
             await message.answer(
-                f"▸ Новых Highlights нет\n"
-                f"В RSS: {all_count} видео, из них {seen_count} уже опубликованы{hint}"
+                error_msg(
+                    "Ошибка YouTube",
+                    f"{rss_error}\n\n"
+                    "Проверьте канал и YOUTUBE_CHANNEL_ID в .env",
+                ),
+                reply_markup=main_menu_keyboard(is_admin=True),
             )
             return
 
-        chat_id = message.chat.id if message.chat and message.chat.type != "private" else None
-        if chat_id is None:
-            from config import get_publish_chat_id
-            chat_id = get_publish_chat_id(get_settings())
+        if not new_videos:
+            hint = "\n\n/clearyoutube — для повторной проверки" if seen_count > 0 else ""
+            await message.answer(
+                f"▸ Новых видео нет\n"
+                f"В ленте: {all_count}, уже на модерации/опубликовано: {seen_count}{hint}",
+                reply_markup=main_menu_keyboard(is_admin=True),
+            )
+            return
+
+        session_factory = get_session_factory()
+        if not session_factory:
+            await message.answer(
+                error_msg("БД не инициализирована"),
+                reply_markup=main_menu_keyboard(is_admin=True),
+            )
+            return
+        sent = 0
         for v in new_videos:
-            from ui.design import card
-            text = card("🏸 Highlights", v.title, footer=f"<a href='{v.link}'>Смотреть →</a>")
-            await bot.send_message(chat_id, text)
+            async with session_factory() as session:
+                ym = await create_youtube_moderation(session, v.video_id, v.title, v.link, ch_id)
+            if ym is None:
+                continue
+            if await send_youtube_to_moderation(bot, ym.id, ym.title, ym.link):
+                mark_youtube_sent_to_moderation(v.video_id)
+                sent += 1
         await message.answer(
-            success_msg(f"Опубликовано {len(new_videos)} новых видео", f"Всего в RSS: {all_count}")
+            success_msg(
+                f"На модерацию отправлено {sent} из {len(new_videos)}",
+                "Одобренные публикуйте кнопкой «В ленту». Очистить очередь: кнопка «🧹 Очистить предложения» или команда /clearyoutubequeue.",
+            ),
+            reply_markup=main_menu_keyboard(is_admin=True),
         )
     except Exception as e:
-        await message.answer(error_msg(str(e)))
+        await message.answer(
+            error_msg(str(e)),
+            reply_markup=main_menu_keyboard(is_admin=True),
+        )
 
 
 @router.message(Command("clearyoutube"))
@@ -262,24 +353,51 @@ async def cmd_clearyoutube(message: Message) -> None:
     )
 
 
-@router.message(or_f(Command("ratings"), F.text == "📈 Рейтинги"))
-async def cmd_ratings(message: Message) -> None:
-    """Рейтинги тренировок за текущий месяц в разрезе тренеров — доступно всем."""
+@router.message(or_f(Command("clearyoutubequeue"), F.text == "🧹 Очистить предложения"))
+async def cmd_clearyoutubequeue(message: Message) -> None:
+    """Очистить очередь YouTube на модерации (все предложенные видео). Только админ, только личка."""
+    if not (message.from_user and _is_admin(message.from_user.id)):
+        return
+    if message.chat.type != "private":
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
     session_factory = get_session_factory()
     if not session_factory:
         await message.answer(error_msg("БД не инициализирована"))
         return
-    from calendar import monthrange
+    try:
+        async with session_factory() as session:
+            count = await clear_pending_youtube_moderation(session)
+        await message.answer(
+            success_msg(
+                "Очередь предложений YouTube очищена",
+                f"Удалено записей из очереди модерации: {count}.",
+            )
+        )
+    except Exception as e:
+        await message.answer(error_msg(str(e)))
+
+
+@router.message(or_f(Command("ratings"), F.text == "📈 Рейтинги"))
+async def cmd_ratings(message: Message) -> None:
+    """Рейтинги тренировок — только в личном чате, только для админа. В группе — удалить сообщение и не отвечать."""
+    if await _block_in_group(message):
+        return
+    if not (message.from_user and _is_admin(message.from_user.id)):
+        return
+    session_factory = get_session_factory()
+    if not session_factory:
+        await message.answer(error_msg("БД не инициализирована"))
+        return
     from database.repositories import get_ratings_by_trainer
     from ui.design import ratings_card
     today = date.today()
     start_date = date(today.year, today.month, 1)
     last_day = monthrange(today.year, today.month)[1]
     end_date = date(today.year, today.month, last_day)
-    MONTHS_RU = {
-        1: "январь", 2: "февраль", 3: "март", 4: "апрель", 5: "май", 6: "июнь",
-        7: "июль", 8: "август", 9: "сентябрь", 10: "октябрь", 11: "ноябрь", 12: "декабрь",
-    }
     month_name = MONTHS_RU.get(today.month, str(today.month))
     settings = get_settings()
     async with session_factory() as session:
@@ -289,39 +407,70 @@ async def cmd_ratings(message: Message) -> None:
 
 
 @router.message(or_f(Command("report"), F.text == "📊 Отчёт"))
-async def cmd_report(message: Message, bot: Bot) -> None:
-    """Ручное формирование месячного отчёта и отправка файла (только для админа, только в личке)."""
+async def cmd_report(message: Message) -> None:
+    """Показать выбор месяца для формирования отчёта (только для админа, только в личке)."""
     if not (message.from_user and _is_admin(message.from_user.id)):
         return
     if await _block_in_group(message):
         return
+    await message.answer(
+        "📊 <b>Выберите месяц для отчёта</b>",
+        reply_markup=report_month_keyboard(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("report_sel:"))
+async def cb_report_month(callback: CallbackQuery, bot: Bot) -> None:
+    """Сформировать отчёт за выбранный месяц и отправить файл админу."""
+    if not (callback.from_user and _is_admin(callback.from_user.id)):
+        await callback.answer("Доступно только админу.", show_alert=True)
+        return
+    if not callback.message:
+        await callback.answer()
+        return
+    parsed = _parse_year_month(callback.data, "report_sel:")
+    if not parsed:
+        await callback.answer("Неверный формат.", show_alert=True)
+        return
+    y, m = parsed
+    report_date = date(y, m, 1)
+    await callback.answer("Формирую отчёт…")
     session_factory = get_session_factory()
     if not session_factory:
-        await message.answer(error_msg("БД не инициализирована"))
+        await callback.message.answer(error_msg("БД не инициализирована"))
         return
-    report_date = date.today()
     async with session_factory() as session:
         records = await get_monthly_attendance_records(session, report_date.year, report_date.month)
     path = await generate_report(report_date, records)
     if path:
         unique_users = len({r[0] for r in records})
         sessions = len({r[3] for r in records})
-        # Всегда в личку админу — не в групповой чат
+        month_name = MONTHS_RU.get(report_date.month, str(report_date.month))
+        chat_id = callback.message.chat.id if callback.message else get_settings().admin_id
         await bot.send_document(
-            chat_id=get_settings().admin_id,
+            chat_id=chat_id,
             document=FSInputFile(path),
             caption=success_msg(
-                f"Отчёт · {MONTHS_RU.get(report_date.month, '')} {report_date.year}",
+                f"Отчёт · {month_name} {report_date.year}",
                 f"{unique_users} участников · {sessions} тренировок",
             ),
         )
+        if callback.message:
+            try:
+                await callback.message.edit_text(
+                    f"✅ Отчёт за {month_name} {report_date.year} сформирован и отправлен.",
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
     else:
-        await message.answer(error_msg("Не удалось сформировать отчёт"))
+        await callback.message.answer(error_msg("Не удалось сформировать отчёт")) if callback.message else None
 
 
 @router.message(F.text.in_({"⚙️ Админ", "Админ"}))
 async def cmd_admin_refresh(message: Message) -> None:
-    """Обновить клавиатуру с admin-кнопками. Только в личке."""
+    """Напоминание: управление — кнопки основного меню (без отдельной inline-панели). Только в личке, только для админа."""
     if not (message.from_user and _is_admin(message.from_user.id)):
         return
     if message.chat.type != "private":
@@ -331,7 +480,7 @@ async def cmd_admin_refresh(message: Message) -> None:
             pass
         return
     await message.answer(
-        "▸ Меню обновлено",
+        "Используйте кнопки меню ниже: Опрос, Отчёт, Новости, Квиз, Топ-3, Рейтинги, YouTube, Статистика, Ответ квиза.",
         reply_markup=main_menu_keyboard(is_admin=True),
     )
 
@@ -377,9 +526,11 @@ async def cb_admin_action(callback: CallbackQuery, bot: Bot) -> None:
         "report": run_admin_report,
         "news": run_admin_news,
         "quiz": run_admin_quiz,
+        "quiz_answer": run_admin_quiz_answer,
         "top3": run_admin_top3,
         "ratings": run_admin_ratings,
         "youtube": run_admin_youtube,
+        "stats": run_admin_stats,
     }
     runner = runners.get(action)
     if runner:
@@ -391,7 +542,11 @@ async def cb_admin_action(callback: CallbackQuery, bot: Bot) -> None:
 
 @router.message(or_f(Command("feedback"), F.text == "📝 Оценить"))
 async def cmd_feedback(message: Message, bot: Bot) -> None:
-    """Отправить групповой опрос оценки тренировки в чат."""
+    """Отправить групповой опрос оценки тренировки — только в личке, только для админа."""
+    if await _block_in_group(message):
+        return
+    if not (message.from_user and _is_admin(message.from_user.id)):
+        return
     training_date = get_last_training_date()
     if not training_date:
         await message.answer(error_msg("Не удалось определить дату тренировки"))
@@ -407,40 +562,61 @@ async def cmd_feedback(message: Message, bot: Bot) -> None:
         await message.answer(error_msg("Не удалось отправить опрос"))
 
 
+def _group_reply_markup(message: Message):
+    """В группе — только короткое меню (3 кнопки), чтобы не показывать Оценить/Рейтинги/Помощь."""
+    if message.chat.type != "private":
+        return main_menu_keyboard(is_admin=False)
+    return None
+
+
 @router.message(F.text.in_({"📍 Зал", "/location"}))
 async def cmd_location(message: Message) -> None:
-    """Обработка кнопки «Зал» и команды /location."""
-    await message.answer(location_card(
-        "Олимпийский центр имени братьев Знаменских",
-        "ул. Стромынка, д.4, стр.1",
-        LOCATION_URL,
-    ))
+    """Обработка кнопки «Зал» и команды /location. В группе — ответ с коротким меню."""
+    await message.answer(
+        location_card(
+            "Олимпийский центр имени братьев Знаменских",
+            "ул. Стромынка, д.4, стр.1",
+            LOCATION_URL,
+        ),
+        reply_markup=_group_reply_markup(message),
+    )
 
 
 @router.message(F.text.in_({"⏱ Расписание", "/timetable"}))
 async def cmd_timetable(message: Message) -> None:
-    """Обработка кнопки «Расписание» и команды /timetable."""
-    await message.answer(timetable_card(
-        "Понедельник и Среда",
-        "20:15 – 22:45",
-        "Олимпийский центр, Стромынка д.4",
-    ))
+    """Обработка кнопки «Расписание» и команды /timetable. В группе — ответ с коротким меню."""
+    await message.answer(
+        timetable_card(
+            "Понедельник и Среда",
+            "20:15 – 22:45",
+            "Олимпийский центр, Стромынка д.4",
+        ),
+        reply_markup=_group_reply_markup(message),
+    )
 
 
 @router.message(F.text.in_({"📋 Правила", "/rules"}))
 async def cmd_rules(message: Message) -> None:
-    """Обработка кнопки «Правила» и команды /rules."""
+    """Обработка кнопки «Правила» и команды /rules. В группе — ответ с коротким меню."""
     settings = get_settings()
     rules_path = Path(settings.rules_file)
     if not rules_path.exists():
-        await message.answer(error_msg("Правила пока не добавлены"))
+        await message.answer(
+            error_msg("Правила пока не добавлены"),
+            reply_markup=_group_reply_markup(message),
+        )
         return
     text = rules_path.read_text(encoding="utf-8")
     if not text.strip():
-        await message.answer(error_msg("Правила пока не добавлены"))
+        await message.answer(
+            error_msg("Правила пока не добавлены"),
+            reply_markup=_group_reply_markup(message),
+        )
         return
-    from ui.design import card
-    await message.answer(card("📋 Регламент секции", text))
+    await message.answer(
+        card("📋 Регламент секции", text),
+        reply_markup=_group_reply_markup(message),
+    )
 
 
 @router.message(Command("chatid"))
@@ -533,6 +709,87 @@ async def cmd_clear_news(message: Message) -> None:
             f"Удалено записей: {deleted}\nТеперь «📰 Новости» заново обработает последние посты из каналов.",
         )
     )
+
+
+@router.message(F.text == "📋 Ответ квиза")
+async def cmd_quiz_answer(message: Message, bot: Bot) -> None:
+    """Опубликовать правильный ответ на последний квиз в чат — только для админа, только в личке."""
+    if not (message.from_user and _is_admin(message.from_user.id)):
+        return
+    if await _block_in_group(message):
+        return
+    action_title = "📋 Ответ квиза"
+
+    async def send_start(detail: str = "") -> None:
+        await message.answer(admin_action_start(action_title, detail))
+
+    async def send_success(detail: str = "") -> None:
+        await message.answer(admin_action_success(action_title, detail))
+
+    async def send_error(problem: str) -> None:
+        await message.answer(admin_action_error(action_title, problem))
+
+    ctx = AdminContext(bot, message.chat.id, reply=message.answer, is_private=True)
+    await run_admin_quiz_answer(ctx, send_start, send_success, send_error)
+
+
+@router.message(or_f(Command("stats"), F.text == "📊 Статистика"))
+async def cmd_stats(message: Message) -> None:
+    """Показать выбор месяца для отчёта «Статистика» — только для админа, только в личке."""
+    if not (message.from_user and _is_admin(message.from_user.id)):
+        return
+    if await _block_in_group(message):
+        return
+    await message.answer(
+        "📊 <b>Выберите месяц для статистики</b>",
+        reply_markup=stats_month_keyboard(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("stats_sel:"))
+async def cb_stats_month(callback: CallbackQuery, bot: Bot) -> None:
+    """Показать статистику активности за выбранный месяц."""
+    if not (callback.from_user and _is_admin(callback.from_user.id)):
+        await callback.answer("Доступно только админу.", show_alert=True)
+        return
+    if not callback.message:
+        await callback.answer()
+        return
+    parsed = _parse_year_month(callback.data, "stats_sel:")
+    if not parsed:
+        await callback.answer("Неверный формат.", show_alert=True)
+        return
+    y, m = parsed
+    await callback.answer("Загружаю статистику…")
+    session_factory = get_session_factory()
+    if not session_factory:
+        await bot.send_message(
+            callback.message.chat.id,
+            error_msg("БД не инициализирована"),
+        )
+        return
+    from ui.design import activity_stats_card
+    from database.repositories import get_activity_stats
+    from services.llm import _get_monthly_usage
+    month_name = MONTHS_RU.get(m, str(m))
+    async with session_factory() as session:
+        stats = await get_activity_stats(session, y, m)
+    limit = get_settings().deepseek_monthly_token_limit or 0
+    llm_tokens = _get_monthly_usage() if limit else None
+    text = activity_stats_card(
+        month_name, y, stats,
+        llm_tokens=llm_tokens,
+        llm_limit=limit,
+    )
+    await bot.send_message(callback.message.chat.id, text)
+    try:
+        await callback.message.edit_text(
+            f"✅ Статистика за {month_name} {y} показана выше.",
+            reply_markup=None,
+        )
+    except Exception:
+        pass
 
 
 @router.message(Command("resetreport"))

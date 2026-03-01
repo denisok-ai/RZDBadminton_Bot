@@ -1,0 +1,24 @@
+[project]
+name = "rzdbadminton-bot"
+version = "0.1.0"
+description = "Telegram-бот для секции «Бадминтон РЖД»"
+readme = "docs/Project.md"
+requires-python = ">=3.11"
+dependencies = []  # основной список в requirements.txt
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = [".venv", "__pycache__", "data", "logs", "*.egg-info"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]  # line length — не жёстко, можно включить позже
+
+[tool.ruff.lint.isort]
+known-first-party = ["handlers", "services", "database", "ui", "utils", "middlewares", "app_state"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning"]

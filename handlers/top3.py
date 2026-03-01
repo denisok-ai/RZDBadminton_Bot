@@ -15,14 +15,9 @@ from app_state import get_session_factory
 from config import get_settings, get_publish_chat_id
 from ui.design import card
 from database.repositories import get_top_by_poll_votes
+from utils.constants import MONTHS_RU
 
 logger = logging.getLogger("rzdbadminton")
-
-
-MONTHS_RU = {
-    1: "январь", 2: "февраль", 3: "март", 4: "апрель", 5: "май", 6: "июнь",
-    7: "июль", 8: "август", 9: "сентябрь", 10: "октябрь", 11: "ноябрь", 12: "декабрь",
-}
 
 
 async def send_monthly_top3(

@@ -5,8 +5,10 @@
 @created: 2025-02-25
 """
 
+from functools import lru_cache
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,33 +28,49 @@ class Settings(BaseSettings):
 
     deepseek_api_key: str
     deepseek_base_url: str = "https://api.deepseek.com"
+    # Лимит токенов в месяц (DeepSeek). 0 или не задан — учёт отключён. Цель по qa: ~200–400 ₽/мес.
+    deepseek_monthly_token_limit: int = 0
 
     yandex_disk_token: str
 
     telegram_api_id: int
     telegram_api_hash: str
 
-    database_url: str = "sqlite+aiosqlite:///./badminton_bot.db"
+    database_url: str = "sqlite+aiosqlite:///./data/badminton_bot.db"
 
     debug_mode: bool = False  # true в .env — опросы в TEST_CHAT_ID
 
     timezone: str = "Europe/Moscow"
     sources_file: Path = Path("Doc/sources.txt")
     rules_file: Path = Path("Doc/rules")
+    # Файл правил НФБР (.docx) для контекста квиза — если задан и существует, текст подставляется в промпт
+    rules_docx_file: str | None = None  # например Doc/pravila_nfbr.docx
     report_file: Path = Path("Doc/Бадминтон.xlsx")
     report_template_file: Path = Path("Doc/Бадминтон_шаблон.xlsx")  # шаблон — копировать при создании
     attendance_report_file: Path = Path("Doc/Attendance_Report.xlsx")  # рабочий файл отчёта (excel_reporter)
     report_template_url: str = "https://disk.yandex.ru/i/AJkaQ3HpEjz0aw"
     report_upload_path: str = "/Отчёты/Бадминтон"  # к имени добавится _YYYY-MM-DD.xlsx
-    youtube_channel_id: str | None = None  # BWF TV, например UCsRNTi1LIrgsxpOrejJo6Xw
+    youtube_channel_id: str | None = None  # BWF TV: UChh-akEbUM8_6ghGVnJd6cQ или UCdBDkMCBO1Ni7Fkys-1dKdA
+    # Ключ YouTube Data API v3 — без кавычек в .env; в Google Cloud включите YouTube Data API v3
+    youtube_api_key: str | None = None
+
+    @field_validator("youtube_api_key", mode="before")
+    @classmethod
+    def _strip_youtube_api_key(cls, v: str | None) -> str | None:
+        """Убрать кавычки и пробелы (частая ошибка при копировании из .env)."""
+        if v is None or not isinstance(v, str):
+            return v
+        cleaned = v.strip().strip('"\'')
+        return cleaned if cleaned else None
 
     # Имена тренеров по дням (можно переопределить в .env: TRAINER_MON=Иванов, TRAINER_WED=Петрова)
     trainer_mon: str = "Тренер (Пн)"
     trainer_wed: str = "Тренер (Ср)"
 
 
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Возвращает экземпляр настроек."""
+    """Возвращает закэшированный экземпляр настроек (читает .env один раз)."""
     return Settings()
 
 

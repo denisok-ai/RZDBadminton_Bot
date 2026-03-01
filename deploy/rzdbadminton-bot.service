@@ -9,11 +9,17 @@ User=denisok
 Group=denisok
 WorkingDirectory=/home/denisok/projects/RZDBadminton_Bot
 ExecStart=/home/denisok/projects/RZDBadminton_Bot/.venv/bin/python3 bot.py
+# Автоподнятие после сбоя: перезапуск при падении процесса или ненулевом коде выхода
 Restart=on-failure
 RestartSec=10
+# Не уходить в бесконечный цикл рестартов: макс. 5 попыток за 5 минут, затем — failed (проверить логи)
+StartLimitIntervalSec=300
+StartLimitBurst=5
+# После перезагрузки сервера сервис поднимется сам (enable при установке)
 StandardOutput=journal
 StandardError=journal
 EnvironmentFile=/home/denisok/projects/RZDBadminton_Bot/.env
 
 [Install]
+# Автозапуск при загрузке системы (после падения сервера)
 WantedBy=multi-user.target

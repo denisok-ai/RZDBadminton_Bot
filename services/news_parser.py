@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -95,8 +95,8 @@ async def create_telethon_client() -> TelegramClient:
 
 
 async def run_parse(
-    on_new_post: "callable[[ParsedPost], Awaitable[None]]",
-    on_session_error: "callable[[Exception], Awaitable[None]] | None" = None,
+    on_new_post: Callable[[ParsedPost], Awaitable[None]],
+    on_session_error: Callable[[Exception], Awaitable[None]] | None = None,
 ) -> None:
     """
     Запустить клиент, парсить каналы, вызывать on_new_post для каждого поста.

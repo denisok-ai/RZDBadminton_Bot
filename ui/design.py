@@ -75,13 +75,22 @@ def help_screen(is_admin: bool = False) -> str:
             "/rules — экипировка",
             "/help — эта справка",
         ])),
-        "",
-        section("Оценка тренировки", "Кнопка «📝 Оценить» или команда /feedback — опрос 1–5 за последнюю тренировку."),
     ]
     if is_admin:
         lines.extend([
             "",
-            section("Админ", "Кнопка «⚙️ Админ» — панель: опрос, отчёт, новости, квиз, топ-3, рейтинги, YouTube."),
+            section("Админ", "Управление — кнопки меню: Опрос, Отчёт, Новости, Квиз, Топ-3, Рейтинги, YouTube, Статистика, Ответ квиза."),
+            "",
+            section("Оценка и отчёты", block([
+                "«📝 Оценить» — опрос 1–5 за последнюю тренировку в чат",
+                "«📈 Рейтинги» — средний балл по тренировкам за месяц",
+                "«📊 Статистика» — сводка по опросам, новостям, квизам за месяц",
+            ])),
+            "",
+            section("YouTube", block([
+                "/clearyoutube — сбросить список опубликованных видео (повторная проверка)",
+                "«🧹 Очистить предложения» — очистить очередь видео на модерации",
+            ])),
         ])
     return "\n".join(lines)
 
@@ -101,7 +110,7 @@ def start_screen(is_admin: bool = False) -> str:
     if is_admin:
         main.extend([
             "",
-            section("Админ-панель", "Нажмите ⚙️ Админ и выберите действие в inline-панели"),
+            section("Админ", "Используйте кнопки меню: Опрос, Отчёт, Новости, Квиз, Топ-3, Рейтинги, YouTube, Статистика, Ответ квиза."),
         ])
     return "\n".join(main)
 
@@ -164,6 +173,33 @@ def ratings_card(
     return card(f"📈 Рейтинги · {month} {year}", *lines)
 
 
+def feedback_weekly_card(
+    week_label: str,
+    data: dict[str, tuple[float, int]],
+    trainer_mon: str,
+    trainer_wed: str,
+) -> str:
+    """Карточка итогов обратной связи за неделю (Пн + Ср). data — результат get_ratings_by_trainer."""
+    mon_avg, mon_count = data.get("mon", (0.0, 0))
+    wed_avg, wed_count = data.get("wed", (0.0, 0))
+    overall_avg, overall_count = data.get("overall", (0.0, 0))
+
+    if overall_count == 0:
+        return card("📝 Обратная связь за неделю · " + week_label, "За эту неделю оценок пока нет")
+
+    def _stars(avg: float) -> str:
+        return "⭐" * min(round(avg), 5)
+
+    lines: list[str] = []
+    if mon_count > 0:
+        lines.append(f"🟦 {trainer_mon}: <b>{mon_avg}</b> {_stars(mon_avg)} · {mon_count} оц.")
+    if wed_count > 0:
+        lines.append(f"🟩 {trainer_wed}: <b>{wed_avg}</b> {_stars(wed_avg)} · {wed_count} оц.")
+    lines.append(SEP)
+    lines.append(f"Общий: <b>{overall_avg}</b> {_stars(overall_avg)} · {overall_count} оценок")
+    return card("📝 Обратная связь за неделю · " + week_label, *lines)
+
+
 def news_moderation_card(source: str, text: str) -> str:
     """Карточка новости на модерации."""
     return card(
@@ -172,3 +208,80 @@ def news_moderation_card(source: str, text: str) -> str:
         "",
         text,
     )
+
+
+def activity_stats_card(
+    month: str,
+    year: int,
+    stats: dict,
+    llm_tokens: int | None = None,
+    llm_limit: int = 0,
+) -> str:
+    """Карточка статистики активности чата за месяц.
+
+    Args:
+        month: Название месяца.
+        year: Год.
+        stats: Словарь из get_activity_stats().
+        llm_tokens: Потрачено токенов DeepSeek за месяц (если учёт включён).
+        llm_limit: Месячный лимит токенов (0 — не показывать блок).
+    """
+    polls_sent = stats.get("polls_sent", 0)
+    poll_participants = stats.get("poll_participants", 0)
+    poll_attending = stats.get("poll_attending", 0)
+    news_published = stats.get("news_published", 0)
+    quizzes_sent = stats.get("quizzes_sent", 0)
+    feedback_sent = stats.get("feedback_sent", 0)
+    feedback_avg = stats.get("feedback_avg", 0.0)
+    feedback_count = stats.get("feedback_count", 0)
+
+    def _stars(avg: float) -> str:
+        return "⭐" * min(round(avg), 5) if avg > 0 else ""
+
+    lines: list[str] = []
+
+    # Опросы посещаемости
+    lines.append("📋 <b>Опросы посещаемости</b>")
+    lines.append(f"  {DOT} Отправлено: <b>{polls_sent}</b>")
+    lines.append(f"  {DOT} Участников (уник.): <b>{poll_participants}</b>")
+    lines.append(f"  {DOT} Планировали прийти: <b>{poll_attending}</b>")
+    lines.append("")
+
+    # Новости
+    lines.append("📰 <b>Новости</b>")
+    lines.append(f"  {DOT} Опубликовано: <b>{news_published}</b>")
+    lines.append("")
+
+    # Квизы
+    quiz_participants = stats.get("quiz_participants", 0)
+    lines.append("🎯 <b>Квизы</b>")
+    lines.append(f"  {DOT} Отправлено: <b>{quizzes_sent}</b>")
+    lines.append(f"  {DOT} Участников: <b>{quiz_participants}</b>")
+    lines.append("")
+
+    # YouTube
+    youtube_sent = stats.get("youtube_sent", 0)
+    youtube_published = stats.get("youtube_published", 0)
+    youtube_rejected = stats.get("youtube_rejected", 0)
+    youtube_pending_total = stats.get("youtube_pending_total", 0)
+    lines.append("🎬 <b>YouTube</b>")
+    lines.append(f"  {DOT} Отправлено на модерацию: <b>{youtube_sent}</b>")
+    lines.append(f"  {DOT} Опубликовано: <b>{youtube_published}</b> · Отклонено: <b>{youtube_rejected}</b>")
+    lines.append(f"  {DOT} В очереди (сейчас): <b>{youtube_pending_total}</b>")
+    lines.append("")
+
+    # Обратная связь
+    lines.append("📝 <b>Обратная связь</b>")
+    lines.append(f"  {DOT} Опросов: <b>{feedback_sent}</b>")
+    if feedback_count > 0:
+        stars = _stars(feedback_avg)
+        lines.append(f"  {DOT} Средняя оценка: <b>{feedback_avg}</b> {stars} · {feedback_count} оц.")
+    else:
+        lines.append(f"  {DOT} Оценок пока нет")
+
+    if llm_limit and llm_tokens is not None:
+        lines.append("")
+        lines.append("🤖 <b>DeepSeek</b>")
+        lines.append(f"  {DOT} Токенов за месяц: <b>{llm_tokens}</b> (лимит {llm_limit})")
+
+    return card(f"📊 Статистика · {month} {year}", *lines)

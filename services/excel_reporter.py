@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 @file: excel_reporter.py
 @description: Генерация Excel-отчёта посещаемости из плоских данных БД (без шаблона).
@@ -17,12 +16,9 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-logger = logging.getLogger("rzdbadminton")
+from utils.constants import MONTHS_RU
 
-MONTHS_RU = {
-    1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель", 5: "Май", 6: "Июнь",
-    7: "Июль", 8: "Август", 9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь",
-}
+logger = logging.getLogger("rzdbadminton")
 
 _COLOR_HEADER = "2E5FA3"
 _COLOR_SUBHEADER = "C5D9F1"
@@ -103,7 +99,7 @@ def _write_excel(
         report_date: дата отчёта (используется для заголовка и имени листа).
         output_path: путь сохранения файла.
     """
-    month_name = MONTHS_RU.get(report_date.month, str(report_date.month))
+    month_name = MONTHS_RU.get(report_date.month, str(report_date.month)).capitalize()
     title = f"Посещаемость · Бадминтон РЖД · {month_name} {report_date.year}"
 
     users, training_dates, attendance = _build_pivot(records)
@@ -112,7 +108,7 @@ def _write_excel(
 
     wb = Workbook()
     ws = wb.active
-    ws.title = f"{month_name} {report_date.year}"
+    ws.title = f"{month_name} {report_date.year}"  # month_name уже capitalize()
 
     border = _border()
 
@@ -125,8 +121,8 @@ def _write_excel(
     ws.row_dimensions[1].height = 26
 
     # ── Row 2: заголовки столбцов ──────────────────────────────────────────
-    DAYS_RU = {0: "Пн", 1: "Вт", 2: "Ср", 3: "Чт", 4: "Пт", 5: "Сб", 6: "Вс"}
-    date_headers = [f"{DAYS_RU.get(d.weekday(), '')}\n{d.strftime('%d.%m')}" for d in training_dates]
+    days_ru = {0: "Пн", 1: "Вт", 2: "Ср", 3: "Чт", 4: "Пт", 5: "Сб", 6: "Вс"}
+    date_headers = [f"{days_ru.get(d.weekday(), '')}\n{d.strftime('%d.%m')}" for d in training_dates]
     headers = ["№", "ФИО / Ник"] + date_headers + ["Итого"]
 
     for col_idx, h in enumerate(headers, start=1):

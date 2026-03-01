@@ -16,11 +16,14 @@ from aiogram.enums import ParseMode
 
 from config import get_settings
 from app_state import set_session_factory
+from database import create_engine, create_session_factory, init_db, ensure_migrations
 from handlers.commands import router as commands_router
+from utils.startup import ensure_dependencies
 from handlers.news import router as news_router
 from handlers.polls import router as polls_router
+from handlers.quiz import router as quiz_router
+from handlers.youtube_moderation import router as youtube_moderation_router
 from middlewares.error_handler import on_error
-from database import create_engine, create_session_factory, init_db
 from services.scheduler import setup_scheduler
 from utils.logger import setup_logger
 from utils.telegram_handler import TelegramErrorHandler
@@ -33,11 +36,14 @@ logger = setup_logger(
 
 async def main() -> None:
     """Запуск бота."""
+    ensure_dependencies(Path(__file__).resolve().parent)
+
     settings = get_settings()
 
     engine = create_engine(settings.database_url)
     session_factory = create_session_factory(engine)
     await init_db(engine)
+    await ensure_migrations(engine)
 
     bot = Bot(
         token=settings.bot_token,
@@ -56,7 +62,9 @@ async def main() -> None:
     dp.errors.register(on_error)
     dp.include_router(commands_router)
     dp.include_router(polls_router)
+    dp.include_router(quiz_router)
     dp.include_router(news_router)
+    dp.include_router(youtube_moderation_router)
 
     scheduler = setup_scheduler(bot, session_factory)
     scheduler.start()
@@ -76,3 +84,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Бот остановлен")
         sys.exit(0)
+    except Exception as e:
+        logger.exception("Завершение по необработанному исключению: %s", e)
+        sys.exit(1)

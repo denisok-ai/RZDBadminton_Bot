@@ -5,6 +5,7 @@
 @created: 2025-02-25
 """
 
+import logging
 from datetime import date
 
 from aiogram import Bot, Router
@@ -20,10 +21,13 @@ from database.repositories import (
     get_feedback_poll_by_telegram_id,
     get_or_create_user,
     get_poll_by_telegram_id,
+    get_quiz_record_by_telegram_id,
     upsert_attendance_rating,
     upsert_poll_vote,
+    upsert_quiz_vote,
 )
 
+logger = logging.getLogger("rzdbadminton")
 router = Router(name="polls")
 
 POLL_OPTIONS = ["Приду 🙋‍♂️", "Не приду 😔", "Может быть 🤔"]
@@ -76,12 +80,19 @@ async def send_attendance_poll(
     )
 
     if msg.poll:
-        async with session_factory() as session:
-            await create_poll(
-                session,
-                telegram_poll_id=str(msg.poll.id),
-                chat_id=chat_id,
-                poll_date=poll_date,
+        try:
+            async with session_factory() as session:
+                await create_poll(
+                    session,
+                    telegram_poll_id=str(msg.poll.id),
+                    chat_id=chat_id,
+                    poll_date=poll_date,
+                )
+        except Exception as e:
+            logger.exception(
+                "Опрос отправлен в чат %s, но не удалось сохранить в БД (ответы не будут учтены): %s",
+                chat_id,
+                e,
             )
     return True
 
@@ -116,6 +127,12 @@ async def on_poll_answer(poll_answer: PollAnswer) -> None:
                     user_id=user.id,
                     attendance_date=feedback_poll.training_date,
                 )
+            return
+
+        # Квиз?
+        quiz_record = await get_quiz_record_by_telegram_id(session, poll_id_str)
+        if quiz_record and poll_answer.option_ids:
+            await upsert_quiz_vote(session, telegram_poll_id=poll_id_str, user_id=user.id)
             return
 
         # Иначе — опрос посещаемости

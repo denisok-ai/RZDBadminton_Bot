@@ -20,7 +20,7 @@ from database.repositories import (
     get_news_moderation,
     update_news_moderation_variants,
 )
-from services.llm import generate_news_variants, rewrite_news
+from services.llm import generate_news_variants
 
 logger = logging.getLogger("rzdbadminton")
 
@@ -43,6 +43,25 @@ REJECT_REASONS: dict[str, str] = {
     "duplicate": "Похоже на дубликат",
     "other": "Другая причина",
 }
+
+
+async def _require_admin(callback: CallbackQuery) -> bool:
+    """Проверить, что callback от админа. Если нет — отправить ответ и вернуть False."""
+    if callback.from_user and callback.from_user.id == get_settings().admin_id:
+        return True
+    await callback.answer("Доступно только админу.", show_alert=True)
+    return False
+
+
+def _parse_moderation_id(callback_data: str | None, prefix: str) -> int | None:
+    """Извлечь moderation_id из callback_data. При ошибке парсинга вернуть None."""
+    if not callback_data or not callback_data.startswith(prefix):
+        return None
+    try:
+        raw = callback_data.replace(prefix, "", 1).strip()
+        return int(raw) if raw else None
+    except ValueError:
+        return None
 
 
 def _news_keyboard(moderation_id: int) -> InlineKeyboardMarkup:
@@ -215,11 +234,12 @@ async def send_news_to_moderation(
 @router.callback_query(F.data.startswith(CALLBACK_PUBLISH))
 async def cb_publish(callback: CallbackQuery) -> None:
     """Запросить подтверждение публикации новости."""
-    if callback.from_user and callback.from_user.id != get_settings().admin_id:
-        await callback.answer("Доступно только админу.", show_alert=True)
+    if not await _require_admin(callback):
         return
-
-    moderation_id = int(callback.data.replace(CALLBACK_PUBLISH, ""))
+    moderation_id = _parse_moderation_id(callback.data, CALLBACK_PUBLISH)
+    if moderation_id is None:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
     await callback.message.edit_reply_markup(
         reply_markup=_confirm_keyboard(moderation_id, "publish")
     )
@@ -229,11 +249,12 @@ async def cb_publish(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith(CALLBACK_REJECT))
 async def cb_reject(callback: CallbackQuery) -> None:
     """Запросить подтверждение отклонения новости."""
-    if callback.from_user and callback.from_user.id != get_settings().admin_id:
-        await callback.answer("Доступно только админу.", show_alert=True)
+    if not await _require_admin(callback):
         return
-
-    moderation_id = int(callback.data.replace(CALLBACK_REJECT, ""))
+    moderation_id = _parse_moderation_id(callback.data, CALLBACK_REJECT)
+    if moderation_id is None:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
     await callback.message.edit_reply_markup(
         reply_markup=_confirm_keyboard(moderation_id, "reject")
     )
@@ -243,11 +264,12 @@ async def cb_reject(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith(CALLBACK_BACK))
 async def cb_back(callback: CallbackQuery) -> None:
     """Вернуться к основной клавиатуре модерации."""
-    if callback.from_user and callback.from_user.id != get_settings().admin_id:
-        await callback.answer("Доступно только админу.", show_alert=True)
+    if not await _require_admin(callback):
         return
-
-    moderation_id = int(callback.data.replace(CALLBACK_BACK, ""))
+    moderation_id = _parse_moderation_id(callback.data, CALLBACK_BACK)
+    if moderation_id is None:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
     await callback.message.edit_reply_markup(reply_markup=_news_keyboard(moderation_id))
     await callback.answer()
 
@@ -255,11 +277,12 @@ async def cb_back(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith(CALLBACK_PUBLISH_CONFIRM))
 async def cb_publish_confirm(callback: CallbackQuery, bot: Bot) -> None:
     """Опубликовать новость в основной чат (после подтверждения)."""
-    if callback.from_user and callback.from_user.id != get_settings().admin_id:
-        await callback.answer("Доступно только админу.", show_alert=True)
+    if not await _require_admin(callback):
         return
-
-    moderation_id = int(callback.data.replace(CALLBACK_PUBLISH_CONFIRM, ""))
+    moderation_id = _parse_moderation_id(callback.data, CALLBACK_PUBLISH_CONFIRM)
+    if moderation_id is None:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
     session_factory = get_session_factory()
     if not session_factory:
         await callback.answer("Ошибка БД.", show_alert=True)
@@ -322,11 +345,12 @@ async def cb_publish_confirm(callback: CallbackQuery, bot: Bot) -> None:
 @router.callback_query(F.data.startswith(CALLBACK_REJECT_CONFIRM))
 async def cb_reject_confirm(callback: CallbackQuery) -> None:
     """Попросить выбрать причину отклонения."""
-    if callback.from_user and callback.from_user.id != get_settings().admin_id:
-        await callback.answer("Доступно только админу.", show_alert=True)
+    if not await _require_admin(callback):
         return
-
-    moderation_id = int(callback.data.replace(CALLBACK_REJECT_CONFIRM, ""))
+    moderation_id = _parse_moderation_id(callback.data, CALLBACK_REJECT_CONFIRM)
+    if moderation_id is None:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
     await callback.message.edit_reply_markup(reply_markup=_reject_reason_keyboard(moderation_id))
     await callback.answer("Выберите причину отклонения")
 
@@ -334,17 +358,18 @@ async def cb_reject_confirm(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith(CALLBACK_REJECT_REASON))
 async def cb_reject_reason(callback: CallbackQuery) -> None:
     """Отклонить новость с выбранной причиной."""
-    if callback.from_user and callback.from_user.id != get_settings().admin_id:
-        await callback.answer("Доступно только админу.", show_alert=True)
+    if not await _require_admin(callback):
         return
-
-    payload = callback.data.replace(CALLBACK_REJECT_REASON, "")
+    payload = callback.data.replace(CALLBACK_REJECT_REASON, "", 1).strip()
     parts = payload.split(":")
     if len(parts) != 2:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
-
-    moderation_id = int(parts[0])
+    try:
+        moderation_id = int(parts[0])
+    except ValueError:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
     reason_code = parts[1]
     reason_text = REJECT_REASONS.get(reason_code, REJECT_REASONS["other"])
 
@@ -370,11 +395,12 @@ async def cb_reject_reason(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith(CALLBACK_EDIT))
 async def cb_edit(callback: CallbackQuery, bot: Bot) -> None:
     """Показать варианты рерайта для выбора."""
-    if callback.from_user and callback.from_user.id != get_settings().admin_id:
-        await callback.answer("Доступно только админу.", show_alert=True)
+    if not await _require_admin(callback):
         return
-
-    moderation_id = int(callback.data.replace(CALLBACK_EDIT, ""))
+    moderation_id = _parse_moderation_id(callback.data, CALLBACK_EDIT)
+    if moderation_id is None:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
     session_factory = get_session_factory()
     if not session_factory:
         await callback.answer("Ошибка БД.", show_alert=True)
@@ -393,7 +419,6 @@ async def cb_edit(callback: CallbackQuery, bot: Bot) -> None:
 
         await update_news_moderation_variants(session, moderation_id, variants)
 
-    from ui.design import SEP
     text = "<b>▸ Выберите вариант</b>\n" + SEP + "\n"
     for i, v in enumerate(variants, 1):
         text += f"{i}. {v}\n\n"
@@ -409,17 +434,18 @@ async def cb_edit(callback: CallbackQuery, bot: Bot) -> None:
 @router.callback_query(F.data.startswith(CALLBACK_VARIANT))
 async def cb_variant(callback: CallbackQuery, bot: Bot) -> None:
     """Выбрать вариант и опубликовать."""
-    if callback.from_user and callback.from_user.id != get_settings().admin_id:
-        await callback.answer("Доступно только админу.", show_alert=True)
+    if not await _require_admin(callback):
         return
-
-    parts = callback.data.replace(CALLBACK_VARIANT, "").split(":")
+    parts = callback.data.replace(CALLBACK_VARIANT, "", 1).strip().split(":")
     if len(parts) != 2:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
-
-    moderation_id = int(parts[0])
-    index = int(parts[1])
+    try:
+        moderation_id = int(parts[0])
+        index = int(parts[1])
+    except ValueError:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
 
     session_factory = get_session_factory()
     if not session_factory:
@@ -476,8 +502,7 @@ async def cb_variant(callback: CallbackQuery, bot: Bot) -> None:
 @router.callback_query(F.data.startswith(CALLBACK_VARIANTS_BACK))
 async def cb_variants_back(callback: CallbackQuery) -> None:
     """Закрыть список вариантов и вернуть админа к карточке новости."""
-    if callback.from_user and callback.from_user.id != get_settings().admin_id:
-        await callback.answer("Доступно только админу.", show_alert=True)
+    if not await _require_admin(callback):
         return
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.answer("↩️ Вернитесь к карточке новости выше для модерации.")
