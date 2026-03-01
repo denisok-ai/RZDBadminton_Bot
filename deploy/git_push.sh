@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Отправка сборки на git (origin main).
 # Запуск из корня проекта: ./deploy/git_push.sh
 

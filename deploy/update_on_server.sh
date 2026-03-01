@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Обновление и перезапуск бота на сервере (Docker).
 # Запускать из каталога проекта: cd /opt/RZDBadminton_Bot && ./deploy/update_on_server.sh
 
