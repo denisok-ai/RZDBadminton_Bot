@@ -5,11 +5,14 @@
 @created: 2025-02-25
 """
 
+import json
 import logging
-from datetime import date
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 
 from config import get_settings, get_publish_chat_id
 from database.repositories import (
@@ -44,9 +47,29 @@ logger = logging.getLogger("rzdbadminton")
 
 def setup_scheduler(bot, session_factory) -> AsyncIOScheduler:
     """Настроить планировщик: опросы Пн/Ср 08:00, отчёты 23:00."""
-    scheduler = AsyncIOScheduler(timezone=get_settings().timezone)
+    tz_name = get_settings().timezone
+    scheduler = AsyncIOScheduler(timezone=tz_name)
+
+    # #region agent log
+    try:
+        tz = ZoneInfo(tz_name)
+        now = datetime.now(tz)
+        with open("logs/debug-1df0fa.log", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"sessionId": "1df0fa", "hypothesisId": "H2", "location": "scheduler.py:setup_scheduler", "message": "scheduler_start", "data": {"timezone": tz_name, "now_iso": now.isoformat(), "weekday": now.weekday(), "hour": now.hour, "minute": now.minute}, "timestamp": int(now.timestamp() * 1000)}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # #endregion
 
     async def job_send_poll():
+        # #region agent log
+        try:
+            tz = ZoneInfo(get_settings().timezone)
+            now = datetime.now(tz)
+            with open("logs/debug-1df0fa.log", "a", encoding="utf-8") as f:
+                f.write(json.dumps({"sessionId": "1df0fa", "hypothesisId": "H2,H3,H4", "location": "scheduler.py:job_send_poll", "message": "job_send_poll_fired", "data": {"now_iso": now.isoformat(), "weekday": now.weekday(), "hour": now.hour, "minute": now.minute}, "timestamp": int(now.timestamp() * 1000)}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
         try:
             await send_attendance_poll(bot, session_factory)
             logger.info("Опрос посещаемости отправлен")
@@ -92,6 +115,18 @@ def setup_scheduler(bot, session_factory) -> AsyncIOScheduler:
         CronTrigger(day_of_week="mon,wed", hour=8, minute=0),
         id="attendance_poll",
     )
+    # Одноразовая диагностика: срабатывает ли планировщик через 3 мин после старта (проверка H3/H4)
+    async def _diagnostic_job():
+        try:
+            tz = ZoneInfo(get_settings().timezone)
+            now = datetime.now(tz)
+            with open("logs/debug-1df0fa.log", "a", encoding="utf-8") as f:
+                f.write(json.dumps({"sessionId": "1df0fa", "hypothesisId": "H3", "location": "scheduler.py:_diagnostic_job", "message": "diagnostic_job_fired", "data": {"now_iso": now.isoformat()}, "timestamp": int(now.timestamp() * 1000)}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    run_at = datetime.now(ZoneInfo(tz_name)) + timedelta(minutes=3)
+    scheduler.add_job(_diagnostic_job, DateTrigger(run_date=run_at), id="diagnostic_once")
     scheduler.add_job(
         job_generate_report,
         CronTrigger(day_of_week="mon,wed", hour=23, minute=0),
