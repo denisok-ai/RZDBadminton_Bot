@@ -22,6 +22,7 @@ from utils.startup import ensure_dependencies
 from handlers.news import router as news_router
 from handlers.polls import router as polls_router
 from handlers.quiz import router as quiz_router
+from handlers.vk_moderation import router as vk_moderation_router
 from handlers.youtube_moderation import router as youtube_moderation_router
 from middlewares.error_handler import on_error
 from services.scheduler import setup_scheduler
@@ -65,9 +66,14 @@ async def main() -> None:
     dp.include_router(quiz_router)
     dp.include_router(news_router)
     dp.include_router(youtube_moderation_router)
+    dp.include_router(vk_moderation_router)
 
     scheduler = setup_scheduler(bot, session_factory)
     scheduler.start()
+    # Аудит после start(): реальные next_run по задачам (до start() они были None)
+    for job in scheduler.get_jobs():
+        next_run = getattr(job, "next_run_time", None)
+        logger.info("scheduler: job %s next_run=%s", job.id, next_run)
 
     logger.info("Бот запущен (опросы Пн, Ср 08:00)")
     try:

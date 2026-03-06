@@ -32,6 +32,7 @@ from ui.design import (
     timetable_card,
 )
 from database.repositories import (
+    clear_pending_vk_moderation,
     clear_pending_youtube_moderation,
     get_monthly_attendance_records,
 )
@@ -46,7 +47,7 @@ from handlers.admin_helpers import (
     run_admin_report,
     run_admin_stats,
     run_admin_top3,
-    run_admin_youtube,
+    run_admin_video,
 )
 from handlers.feedback import get_last_training_date, send_feedback_poll_to_chat
 from handlers.polls import send_attendance_poll
@@ -260,75 +261,32 @@ async def cmd_top3(message: Message, bot: Bot) -> None:
         await message.answer(error_msg("Ошибка отправки Топ-3"))
 
 
-@router.message(or_f(Command("youtube"), F.text == "🎬 YouTube"))
-async def cmd_youtube(message: Message, bot: Bot) -> None:
-    """Ручная проверка новых видео BWF TV — отправка на модерацию админу (в личку); в чат только после «В ленту»."""
+@router.message(or_f(Command("youtube"), Command("video"), F.text == "🎬 Видео"))
+async def cmd_video(message: Message, bot: Bot) -> None:
+    """Проверка новых видео (YouTube + VK) — отправка на модерацию; в чат только после «В ленту»."""
     if not (message.from_user and _is_admin(message.from_user.id)):
         return
     if await _block_in_group(message):
         return
-    from services.youtube_monitor import DEFAULT_BWF_CHANNEL_ID, check_highlights_status, mark_youtube_sent_to_moderation
-    from database.repositories import create_youtube_moderation
-    from handlers.youtube_moderation import send_youtube_to_moderation
+    action_title = "Видео"
 
-    settings = get_settings()
-    ch_id = settings.youtube_channel_id or DEFAULT_BWF_CHANNEL_ID
-    await message.answer("▸ Проверяю канал BWF TV…")
-    try:
-        result = await check_highlights_status()
-        all_count = len(result["all"])
-        new_videos = result["new"]
-        seen_count = len(result["seen"])
-        rss_error = result.get("error")
+    async def send_start(detail: str = "") -> None:
+        await message.answer(admin_action_start(action_title, detail))
 
-        if rss_error:
-            await message.answer(
-                error_msg(
-                    "Ошибка YouTube",
-                    f"{rss_error}\n\n"
-                    "Проверьте канал и YOUTUBE_CHANNEL_ID в .env",
-                ),
-                reply_markup=main_menu_keyboard(is_admin=True),
-            )
-            return
-
-        if not new_videos:
-            hint = "\n\n/clearyoutube — для повторной проверки" if seen_count > 0 else ""
-            await message.answer(
-                f"▸ Новых видео нет\n"
-                f"В ленте: {all_count}, уже на модерации/опубликовано: {seen_count}{hint}",
-                reply_markup=main_menu_keyboard(is_admin=True),
-            )
-            return
-
-        session_factory = get_session_factory()
-        if not session_factory:
-            await message.answer(
-                error_msg("БД не инициализирована"),
-                reply_markup=main_menu_keyboard(is_admin=True),
-            )
-            return
-        sent = 0
-        for v in new_videos:
-            async with session_factory() as session:
-                ym = await create_youtube_moderation(session, v.video_id, v.title, v.link, ch_id)
-            if ym is None:
-                continue
-            if await send_youtube_to_moderation(bot, ym.id, ym.title, ym.link):
-                mark_youtube_sent_to_moderation(v.video_id)
-                sent += 1
+    async def send_success(detail: str = "") -> None:
         await message.answer(
-            success_msg(
-                f"На модерацию отправлено {sent} из {len(new_videos)}",
-                "Одобренные публикуйте кнопкой «В ленту». Очистить очередь: кнопка «🧹 Очистить предложения» или команда /clearyoutubequeue.",
-            ),
+            admin_action_success(action_title, detail),
             reply_markup=main_menu_keyboard(is_admin=True),
         )
-    except Exception as e:
+
+    async def send_error(problem: str) -> None:
         await message.answer(
-            error_msg(str(e)),
+            admin_action_error(action_title, problem),
             reply_markup=main_menu_keyboard(is_admin=True),
         )
+
+    ctx = AdminContext(bot, message.chat.id, reply=message.answer, is_private=True)
+    await run_admin_video(ctx, send_start, send_success, send_error)
 
 
 @router.message(Command("clearyoutube"))
@@ -348,14 +306,14 @@ async def cmd_clearyoutube(message: Message) -> None:
         success_msg(
             "Список опубликованных видео очищен",
             f"Удалено записей: {cleared}\n"
-            "Теперь «🎬 YouTube» повторно опубликует последние Highlights из BWF TV.",
+            "Теперь кнопка «🎬 Видео» повторно проверит YouTube и VK.",
         )
     )
 
 
 @router.message(or_f(Command("clearyoutubequeue"), F.text == "🧹 Очистить предложения"))
 async def cmd_clearyoutubequeue(message: Message) -> None:
-    """Очистить очередь YouTube на модерации (все предложенные видео). Только админ, только личка."""
+    """Очистить очередь видео на модерации (YouTube + VK). Только админ, только личка."""
     if not (message.from_user and _is_admin(message.from_user.id)):
         return
     if message.chat.type != "private":
@@ -370,11 +328,16 @@ async def cmd_clearyoutubequeue(message: Message) -> None:
         return
     try:
         async with session_factory() as session:
-            count = await clear_pending_youtube_moderation(session)
+            count_yt = await clear_pending_youtube_moderation(session)
+            try:
+                count_vk = await clear_pending_vk_moderation(session)
+            except Exception:
+                count_vk = 0  # таблица vk_video_moderation может отсутствовать в старых БД
+        total = count_yt + count_vk
         await message.answer(
             success_msg(
-                "Очередь предложений YouTube очищена",
-                f"Удалено записей из очереди модерации: {count}.",
+                "Очередь предложений очищена",
+                f"Удалено из очереди модерации: YouTube {count_yt}, VK {count_vk} (всего {total}).",
             )
         )
     except Exception as e:
@@ -480,7 +443,7 @@ async def cmd_admin_refresh(message: Message) -> None:
             pass
         return
     await message.answer(
-        "Используйте кнопки меню ниже: Опрос, Отчёт, Новости, Квиз, Топ-3, Рейтинги, YouTube, Статистика, Ответ квиза.",
+        "Используйте кнопки меню ниже: Опрос, Отчёт, Новости, Квиз, Топ-3, Рейтинги, Видео, Статистика, Ответ квиза.",
         reply_markup=main_menu_keyboard(is_admin=True),
     )
 
@@ -529,7 +492,7 @@ async def cb_admin_action(callback: CallbackQuery, bot: Bot) -> None:
         "quiz_answer": run_admin_quiz_answer,
         "top3": run_admin_top3,
         "ratings": run_admin_ratings,
-        "youtube": run_admin_youtube,
+        "youtube": run_admin_video,
         "stats": run_admin_stats,
     }
     runner = runners.get(action)

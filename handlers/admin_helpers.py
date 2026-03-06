@@ -20,6 +20,9 @@ from handlers.top3 import send_monthly_top3
 from services.scheduler import run_news_monitor
 from ui.keyboards import report_month_keyboard, stats_month_keyboard
 from utils.constants import MONTHS_RU
+from database.repositories import create_vk_moderation
+from handlers.vk_moderation import send_vk_to_moderation
+from services.vk_video_monitor import fetch_vk_videos
 from services.youtube_monitor import check_highlights_status
 
 
@@ -187,7 +190,7 @@ async def run_admin_youtube(
     send_success: Callable[[str], Awaitable[None]],
     send_error: Callable[[str], Awaitable[None]],
 ) -> None:
-    """Проверить новые видео BWF TV и отправить на модерацию (в личку); публикация в чат — по кнопке «В ленту»."""
+    """Проверить новые видео YouTube и отправить на модерацию."""
     from services.youtube_monitor import DEFAULT_BWF_CHANNEL_ID, mark_youtube_sent_to_moderation
 
     from database.repositories import create_youtube_moderation
@@ -195,7 +198,7 @@ async def run_admin_youtube(
 
     settings = get_settings()
     ch_id = settings.youtube_channel_id or DEFAULT_BWF_CHANNEL_ID
-    await send_start("Проверяю канал BWF TV…")
+    await send_start("Проверяю YouTube…")
     try:
         result = await check_highlights_status()
         all_count = len(result["all"])
@@ -205,7 +208,7 @@ async def run_admin_youtube(
 
         if rss_error:
             await send_error(
-                f"Ошибка RSS: {rss_error}\n"
+                f"Ошибка YouTube: {rss_error}\n"
                 f"Канал: {ch_id}\n"
                 "Проверьте YOUTUBE_CHANNEL_ID в .env"
             )
@@ -213,7 +216,7 @@ async def run_admin_youtube(
 
         if not new_videos:
             hint = " · /clearyoutube для повторной проверки" if seen_count > 0 else " · RSS пуст"
-            await send_success(f"Новых видео нет · в RSS: {all_count}{hint}")
+            await send_success(f"YouTube: новых видео нет · в RSS: {all_count}{hint}")
             return
 
         session_factory = get_session_factory()
@@ -233,10 +236,59 @@ async def run_admin_youtube(
                 mark_youtube_sent_to_moderation(v.video_id)
                 sent += 1
         await send_success(
-            f"На модерацию отправлено {sent} из {len(new_videos)} новых · одобренные публикуйте кнопкой «В ленту»"
+            f"YouTube: на модерацию {sent} из {len(new_videos)} · одобренные — кнопка «В ленту»"
         )
     except Exception as e:
         await send_error(str(e))
+
+
+async def run_admin_vk(
+    ctx: AdminContext,
+    send_start: Callable[[str], Awaitable[None]],
+    send_success: Callable[[str], Awaitable[None]],
+    send_error: Callable[[str], Awaitable[None]],
+) -> None:
+    """Проверить новые видео VK Видео и отправить на модерацию."""
+    settings = get_settings()
+    if not (settings.vk_access_token or "").strip():
+        await send_success("VK: токен не задан (VK_ACCESS_TOKEN в .env) · только YouTube")
+        return
+    await send_start("Проверяю VK Видео…")
+    try:
+        videos = await fetch_vk_videos()
+        if not videos:
+            await send_success("VK: новых видео нет или каналы пусты")
+            return
+        session_factory = get_session_factory()
+        if not session_factory:
+            await send_error("Ошибка БД")
+            return
+        sent = 0
+        for v in videos:
+            async with session_factory() as session:
+                vm = await create_vk_moderation(
+                    session, v.video_id, v.title, v.link, v.channel_id
+                )
+            if vm is None:
+                continue
+            if await send_vk_to_moderation(ctx.bot, vm.id, vm.title, vm.link):
+                sent += 1
+        await send_success(
+            f"VK: на модерацию {sent} из {len(videos)} · одобренные — кнопка «В ленту»"
+        )
+    except Exception as e:
+        await send_error(f"VK: {e}")
+
+
+async def run_admin_video(
+    ctx: AdminContext,
+    send_start: Callable[[str], Awaitable[None]],
+    send_success: Callable[[str], Awaitable[None]],
+    send_error: Callable[[str], Awaitable[None]],
+) -> None:
+    """Проверить YouTube и VK Видео, отправить новые на модерацию (кнопка «Видео»)."""
+    await run_admin_youtube(ctx, send_start, send_success, send_error)
+    await run_admin_vk(ctx, send_start, send_success, send_error)
 
 
 async def run_admin_stats(
@@ -266,6 +318,6 @@ ADMIN_ACTIONS: dict[str, str] = {
     "quiz_answer": "📋 Ответ квиза",
     "top3": "🏆 Топ-3",
     "ratings": "📈 Рейтинги",
-    "youtube": "🎬 YouTube",
+    "youtube": "🎬 Видео",
     "stats": "📊 Статистика",
 }

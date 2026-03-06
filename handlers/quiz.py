@@ -74,8 +74,8 @@ async def send_friday_quiz(bot: Bot, chat_id: int | None = None) -> bool:
     # Telegram ограничивает explanation: до 200 символов
     explanation_trimmed = explanation[:200] if explanation else ""
 
-    async def _send_poll(target_chat_id: int) -> str | None:
-        """Отправить квиз и вернуть telegram_poll_id при успехе."""
+    async def _send_poll(target_chat_id: int) -> tuple[str | None, int | None]:
+        """Отправить квиз и вернуть (telegram_poll_id, message_id) при успехе."""
         msg = await bot.send_poll(
             chat_id=target_chat_id,
             question=f"⚡ Квиз пятницы\n▬▬▬\n{question}",
@@ -85,11 +85,20 @@ async def send_friday_quiz(bot: Bot, chat_id: int | None = None) -> bool:
             correct_option_id=correct_index,
             explanation=explanation_trimmed,
         )
-        return str(msg.poll.id) if msg.poll else None
+        if msg.poll:
+            return (str(msg.poll.id), msg.message_id)
+        return (None, None)
+
+    async def _pin_quiz_async(target_chat_id: int, message_id: int) -> None:
+        try:
+            await bot.pin_chat_message(target_chat_id, message_id)
+            logger.info("Квиз пятницы закреплён в чате %s", target_chat_id)
+        except Exception as e:
+            logger.warning("Не удалось закрепить квиз в чате %s: %s", target_chat_id, e)
 
     try:
-        poll_id = await _send_poll(chat_id)
-        if poll_id:
+        poll_id, message_id = await _send_poll(chat_id)
+        if poll_id and message_id is not None:
             await _save_quiz_record(
                 poll_id,
                 chat_id,
@@ -97,6 +106,7 @@ async def send_friday_quiz(bot: Bot, chat_id: int | None = None) -> bool:
                 correct_answer=correct_answer_text,
                 explanation=explanation,
             )
+            await _pin_quiz_async(chat_id, message_id)
         return True
     except TelegramBadRequest as e:
         err = str(e).lower()
@@ -107,8 +117,8 @@ async def send_friday_quiz(bot: Bot, chat_id: int | None = None) -> bool:
                     settings.admin_id,
                     f"⚠ Чат {chat_id} не найден. Квиз отправлен вам в личку.\n\n{CHAT_NOT_FOUND_HINT}",
                 )
-                poll_id = await _send_poll(settings.admin_id)
-                if poll_id:
+                poll_id, message_id = await _send_poll(settings.admin_id)
+                if poll_id and message_id is not None:
                     await _save_quiz_record(
                         poll_id,
                         settings.admin_id,
@@ -116,6 +126,7 @@ async def send_friday_quiz(bot: Bot, chat_id: int | None = None) -> bool:
                         correct_answer=correct_answer_text,
                         explanation=explanation,
                     )
+                    await _pin_quiz_async(settings.admin_id, message_id)
                 return True
             except Exception:
                 pass

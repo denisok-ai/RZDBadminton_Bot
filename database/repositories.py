@@ -23,6 +23,7 @@ from database.models import (
     QuizRecord,
     QuizVote,
     User,
+    VkVideoModeration,
     YouTubeModeration,
 )
 
@@ -569,6 +570,53 @@ async def get_youtube_moderation(
 async def clear_pending_youtube_moderation(session: AsyncSession) -> int:
     """Удалить все записи YouTube на модерации (очистка очереди предложений). Возвращает количество удалённых."""
     result = await session.execute(delete(YouTubeModeration))
+    count = result.rowcount if result.rowcount is not None else 0
+    await session.commit()
+    return count
+
+
+async def create_vk_moderation(
+    session: AsyncSession,
+    video_id: str,
+    title: str,
+    link: str,
+    channel_id: str,
+) -> VkVideoModeration | None:
+    """
+    Создать запись VK Видео на модерации.
+    Returns:
+        Запись при успехе; None при дубликате video_id.
+    """
+    vm = VkVideoModeration(
+        video_id=video_id,
+        title=title,
+        link=link,
+        channel_id=channel_id,
+    )
+    session.add(vm)
+    try:
+        await session.commit()
+        await session.refresh(vm)
+        return vm
+    except IntegrityError:
+        await session.rollback()
+        return None
+
+
+async def get_vk_moderation(
+    session: AsyncSession,
+    moderation_id: int,
+) -> VkVideoModeration | None:
+    """Получить запись VK Видео на модерации по ID."""
+    result = await session.execute(
+        select(VkVideoModeration).where(VkVideoModeration.id == moderation_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def clear_pending_vk_moderation(session: AsyncSession) -> int:
+    """Удалить все записи VK Видео на модерации. Возвращает количество удалённых."""
+    result = await session.execute(delete(VkVideoModeration))
     count = result.rowcount if result.rowcount is not None else 0
     await session.commit()
     return count

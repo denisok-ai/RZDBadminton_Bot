@@ -132,6 +132,37 @@ DEBUG_MODE=False
 | **Каталог проекта** | `/opt/RZDBadminton_Bot` |
 | **Контейнер** | `rzdbadminton_bot` (образ `rzdbadminton_bot:latest`) |
 
+**Важно для расписания:** в `.env` на сервере должна быть задана переменная **`TIMEZONE=Europe/Moscow`**. Без неё планировщик использует UTC: опрос 08:00 уйдёт в 11:00 МСК, опрос обратной связи 22:45 — в 01:45 МСК следующего дня. После **изменения .env** нужно **пересоздать контейнер** (переменные окружения задаются при создании, а не при перезапуске): `docker compose down && docker compose up -d`. Команда `docker compose restart` **не подхватывает** новые переменные из `.env`.
+
+### Редактирование .env на сервере
+
+Файл `.env` лежит в каталоге проекта: `/opt/RZDBadminton_Bot/.env`. Секреты (токены, ключи) не коммитить в git и не публиковать.
+
+**Редактировать по SSH:**
+
+```bash
+ssh root@46.19.68.241
+nano /opt/RZDBadminton_Bot/.env
+```
+
+Сохранить: **Ctrl+O**, Enter. Выход: **Ctrl+X**. После правок **пересоздать контейнер** (чтобы подхватить .env): `cd /opt/RZDBadminton_Bot && docker compose down && docker compose up -d`. Команда `restart` не перечитывает .env.
+
+**Добавить одну переменную** (например, таймзону):
+
+```bash
+echo 'TIMEZONE=Europe/Moscow' >> /opt/RZDBadminton_Bot/.env
+```
+
+**Проверить содержимое** (без публикации полного вывода — в файле секреты):
+
+```bash
+# Проверить наличие переменной
+grep TIMEZONE /opt/RZDBadminton_Bot/.env
+
+# Список имён переменных (без значений)
+grep -E "^[A-Z]" /opt/RZDBadminton_Bot/.env | cut -d= -f1
+```
+
 ### Команды на сервере
 
 ```bash
@@ -297,11 +328,118 @@ docker compose down
 
 ---
 
+## Диагностика сбоев планировщика (опрос 08:00 и др.)
+
+Если фоновая задача (например, опрос в 08:00 МСК) не сработала вовремя или сработала с задержкой, выполните на сервере следующие команды для поиска корневой причины.
+
+**Подключение:** `ssh root@46.19.68.241`, затем `cd /opt/RZDBadminton_Bot`.
+
+### 1. Часовой пояс (сервер и бот)
+
+Планировщик APScheduler использует время из переменной `TIMEZONE` в `.env` (ожидается `Europe/Moscow`). Если на сервере другой пояс или в `.env` не задан `TIMEZONE`, задачи могут срабатывать в «неправильное» время.
+
+```bash
+# Текущее время сервера и таймзона ОС
+date
+timedatectl
+
+# Какой TIMEZONE видит бот (в .env)
+grep -E "^TIMEZONE=" /opt/RZDBadminton_Bot/.env || echo "TIMEZONE не задан"
+```
+
+Если `TIMEZONE` не задан, APScheduler по умолчанию использует локальное время контейнера (часто UTC). Добавьте в `.env`: `TIMEZONE=Europe/Moscow` и **пересоздайте** контейнер: `docker compose down && docker compose up -d` (недостаточно `restart` — он не перечитывает .env). Проверка: `docker exec rzdbadminton_bot env | grep TIMEZONE` — должно вывести `TIMEZONE=Europe/Moscow`.
+
+### 2. Когда опрос реально отправился
+
+В логах при успешной отправке опроса пишется строка «Опрос посещаемости отправлен». По времени записи можно понять, в какой момент задача выполнилась.
+
+```bash
+# Все упоминания отправки опроса (в текущем и архивных логах)
+grep -h "Опрос посещаемости отправлен" /opt/RZDBadminton_Bot/logs/bot.log* 2>/dev/null | tail -20
+
+# Контекст: строки до и после (даты, ошибки)
+grep -h -B 0 -A 0 "Опрос посещаемости\|attendance_poll\|send_attendance_poll\|Ошибка отправки опроса" /opt/RZDBadminton_Bot/logs/bot.log* 2>/dev/null | tail -30
+```
+
+### 3. Ошибки и падения бота около 08:00
+
+Проверьте лог ошибок и общий лог на момент утра (подставьте нужную дату, например 2026-03-01).
+
+```bash
+# Ошибки за сегодня/вчера (по времени в логе)
+grep "ERROR\|Exception\|Traceback" /opt/RZDBadminton_Bot/logs/errors.log* 2>/dev/null | tail -50
+
+# Строки лога с 07:00 по 12:00 (пример для даты 2026-03-01)
+grep "2026-03-01 0[7-9]\|2026-03-01 1[0-2]" /opt/RZDBadminton_Bot/logs/bot.log 2>/dev/null | head -100
+```
+
+Если видите падение/перезапуск контейнера — время ошибки подскажет, совпало ли с нагрузкой от другого Docker.
+
+### 4. Состояние контейнера и рестарты
+
+Проверьте, не перезапускался ли контейнер бота (например, из-за OOM или падения процесса).
+
+```bash
+# Статус и количество рестартов
+docker ps -a --filter "name=rzdbadminton" --format "table {{.Names}}\t{{.Status}}\t{{.RunningFor}}"
+
+# Логи Docker о контейнере (создание, рестарт, выход)
+docker inspect rzdbadminton_bot --format '{{.State.StartedAt}} {{.State.FinishedAt}} {{.RestartCount}}'
+```
+
+### 5. Нагрузка на сервер (память, OOM)
+
+Если «другой Docker съел все ресурсы», возможен OOM-killer или сильная задержка по CPU. Проверьте системный лог и текущую нагрузку.
+
+```bash
+# Сообщения ядра (OOM, убийство процессов) — смотрите время
+dmesg -T 2>/dev/null | grep -i "oom\|kill\|out of memory" | tail -20
+# или без -T если нет прав:
+dmesg | grep -i "oom\|kill" | tail -20
+
+# Текущее использование памяти контейнерами
+docker stats --no-stream
+```
+
+### 6. Логи планировщика APScheduler
+
+В коде при старте планировщика и при выполнении задач пишутся сообщения в `bot.log`. Можно отфильтровать по времени запуска бота и по идентификатору задачи.
+
+```bash
+# Запуск планировщика и задачи (подставьте дату дня сбоя)
+grep -h "scheduler\|attendance_poll\|job_\|Added job" /opt/RZDBadminton_Bot/logs/bot.log* 2>/dev/null | tail -40
+```
+
+### 7. Краткая последовательность (копируйте блоком)
+
+Выполните по очереди и сохраните вывод — по нему можно сделать вывод: сработал ли планировщик с задержкой из-за нехватки ресурсов, из-за таймзоны или из-за падения бота.
+
+```bash
+cd /opt/RZDBadminton_Bot
+echo "=== 1. Время и таймзона ==="
+date && timedatectl | head -5
+grep -E "^TIMEZONE=" .env || echo "TIMEZONE не задан"
+echo "=== 2. Когда отправился опрос ==="
+grep -h "Опрос посещаемости отправлен" logs/bot.log* 2>/dev/null | tail -10
+echo "=== 3. Ошибки за последние записи ==="
+tail -30 logs/errors.log 2>/dev/null
+echo "=== 4. Контейнер бота ==="
+docker ps -a --filter "name=rzdbadminton" --format "table {{.Names}}\t{{.Status}}\t{{.RunningFor}}"
+docker inspect rzdbadminton_bot --format 'Started: {{.State.StartedAt}} RestartCount: {{.RestartCount}}' 2>/dev/null
+echo "=== 5. OOM / память ==="
+dmesg -T 2>/dev/null | grep -i "oom\|kill" | tail -10 || dmesg | grep -i "oom\|kill" | tail -5
+docker stats --no-stream 2>/dev/null
+```
+
+После анализа: если виновата таймзона — задать `TIMEZONE=Europe/Moscow` в `.env` и **пересоздать** контейнер (`docker compose down && docker compose up -d`), затем проверить `docker exec rzdbadminton_bot env | grep TIMEZONE`; если OOM — ограничить память у «тяжёлого» контейнера или выделить больше ресурсов серверу; если бот падал — смотреть `errors.log` и исправлять причину. Для диагностики опроса обратной связи (22:45 вместо 01:43): `grep "Обратная связь (опрос в чат) отправлена" logs/bot.log*` — по времени в логе видно, в каком поясе сработал планировщик.
+
+---
+
 ## Развёртывание на сервере
 
 1. Склонировать/скопировать проект на сервер
 2. Создать venv, установить зависимости: `pip install -r requirements.txt`
-3. Создать `.env` из `.env.example`, заполнить все переменные
+3. Создать `.env` из `.env.example`, заполнить все переменные. **Для продакшена обязательно** указать `TIMEZONE=Europe/Moscow`, иначе опросы и отчёты будут по UTC (08:00 по расписанию = 11:00 МСК).
 4. **Перед первым запуском:** отправить боту `/start` в личку (от имени ADMIN_ID)
 5. Настроить systemd (см. выше) или Docker
 6. При необходимости — настроить VPN/прокси для доступа к Telegram
@@ -323,6 +461,8 @@ sqlite3 data/badminton_bot.db "ALTER TABLE quiz_records ADD COLUMN explanation T
 ## Переменные окружения (.env)
 
 См. `.env.example` — скопировать и заполнить все значения.
+
+**Для продакшена (Docker на сервере):** задайте **`TIMEZONE=Europe/Moscow`**, иначе расписание (опрос 08:00, отчёт 23:00 и т.д.) будет в UTC. Редактирование `.env` на сервере — см. раздел «Редактирование .env на сервере» выше.
 
 **Опционально:** `RULES_DOCX_FILE` — путь к файлу правил НФБР в формате .docx (например `Doc/pravila_nfbr.docx`). Если задан, текст подставляется в промпт квиза. Требуется пакет `python-docx` (уже в `requirements.txt`). Подробнее: [docs/rules_nfbr_docx.md](rules_nfbr_docx.md).
 

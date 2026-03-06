@@ -4,6 +4,10 @@ services:
     image: rzdbadminton_bot:latest
     container_name: rzdbadminton_bot
     env_file: .env
+    # Явные DNS — если в контейнере "Temporary failure in name resolution" (YouTube и др.)
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs

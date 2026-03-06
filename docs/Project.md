@@ -346,7 +346,7 @@ sequenceDiagram
 | `MAIN_CHAT_ID` | ID основного чата | Да |
 | `TEST_CHAT_ID` | ID тестовой группы (при DEBUG_MODE=True) | Нет |
 | `DEBUG_MODE` | true — опросы, квиз, новости, Топ-3 в TEST_CHAT_ID | Нет |
-| `TIMEZONE` | Часовой пояс планировщика (например Europe/Moscow) | Нет |
+| `TIMEZONE` | Часовой пояс планировщика (Europe/Moscow). Без неё 08:00 = UTC (= 11:00 МСК); для продакшена задать обязательно | Нет (для прода — да) |
 | `DEEPSEEK_API_KEY` | API ключ DeepSeek | Да |
 | `DEEPSEEK_BASE_URL` | URL API DeepSeek | Нет (по умолчанию api.deepseek.com) |
 | `DEEPSEEK_MONTHLY_TOKEN_LIMIT` | Лимит токенов в месяц (0 — учёт отключён). При достижении вызовы LLM блокируются | Нет |

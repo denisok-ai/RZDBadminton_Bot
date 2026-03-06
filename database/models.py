@@ -156,3 +156,17 @@ class YouTubeModeration(Base):
     channel_id: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(50), default="pending")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+
+
+class VkVideoModeration(Base):
+    """VK Видео на модерации (ожидает решения админа: опубликовать / отклонить)."""
+
+    __tablename__ = "vk_video_moderation"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    video_id: Mapped[str] = mapped_column(String(128), unique=True)  # owner_id_video_id
+    title: Mapped[str] = mapped_column(Text)
+    link: Mapped[str] = mapped_column(String(512))
+    channel_id: Mapped[str] = mapped_column(String(64))  # owner_id или screen_name
+    status: Mapped[str] = mapped_column(String(50), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))

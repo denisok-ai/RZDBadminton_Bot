@@ -46,7 +46,7 @@ def main_menu_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
             [
                 KeyboardButton(text="🎯 Квиз"),
                 KeyboardButton(text="🏆 Топ-3"),
-                KeyboardButton(text="🎬 YouTube"),
+                KeyboardButton(text="🎬 Видео"),
             ],
             [
                 KeyboardButton(text="📊 Статистика"),
@@ -221,7 +221,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📈 Рейтинги", callback_data="admin:ratings"),
             ],
             [
-                InlineKeyboardButton(text="🎬 YouTube", callback_data="admin:youtube"),
+                InlineKeyboardButton(text="🎬 Видео", callback_data="admin:youtube"),
                 InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats"),
             ],
         ]

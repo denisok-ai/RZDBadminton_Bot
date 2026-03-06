@@ -94,6 +94,11 @@ async def send_attendance_poll(
                 chat_id,
                 e,
             )
+    try:
+        await bot.pin_chat_message(chat_id, msg.message_id)
+        logger.info("Опрос посещаемости закреплён в чате %s", chat_id)
+    except Exception as e:
+        logger.warning("Не удалось закрепить опрос в чате %s: %s", chat_id, e)
     return True
 
 

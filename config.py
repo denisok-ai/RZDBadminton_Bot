@@ -42,6 +42,24 @@ class Settings(BaseSettings):
 
     timezone: str = "Europe/Moscow"
     sources_file: Path = Path("Doc/sources.txt")
+    vk_sources_file: Path = Path("Doc/vk_sources.txt")  # Ссылки на каналы VK Видео (по одной на строку)
+    vk_access_token: str | None = None  # Токен VK API для video.get (если пусто — VK не опрашивается)
+
+    @field_validator("vk_sources_file", mode="before")
+    @classmethod
+    def _coerce_vk_sources_path(cls, v) -> Path:
+        if v is None:
+            return Path("Doc/vk_sources.txt")
+        return Path(v) if isinstance(v, str) else v
+
+    @field_validator("vk_access_token", mode="before")
+    @classmethod
+    def _strip_vk_token(cls, v: str | None) -> str | None:
+        if v is None or not isinstance(v, str):
+            return None
+        cleaned = v.strip().strip('"\'')
+        return cleaned if cleaned else None
+
     rules_file: Path = Path("Doc/rules")
     # Файл правил НФБР (.docx) для контекста квиза — если задан и существует, текст подставляется в промпт
     rules_docx_file: str | None = None  # например Doc/pravila_nfbr.docx
